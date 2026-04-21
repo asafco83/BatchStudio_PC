@@ -1,4 +1,5 @@
 # Batch Studio PC
+<img width="1442" height="932" alt="image" src="https://github.com/user-attachments/assets/7c810195-4743-4055-8693-66c3bcacd160" />
 
 A powerful desktop video editor for repurposing a single source video **or static image** into multiple platform-sized outputs (Instagram, TikTok, YouTube, etc.) with text, icon overlays, and compliance badges.
 
@@ -50,6 +51,10 @@ npm run tauri:build
 ```
 
 The installer will be generated in `src-tauri/target/release/bundle/`.
+
+## Portable build
+Download and extract zip:
+https://github.com/asafco83/BatchStudio_PC/blob/main/Batch-Studio-portable.zip
 
 ## Project Layout
 
