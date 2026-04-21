@@ -1,82 +1,66 @@
-# Batch Studio
+# Batch Studio PC
 
-A browser-based editor for repurposing a single source video **or static image** into multiple platform-sized outputs (Instagram, TikTok, YouTube, etc.) with text, icon overlays, and compliance badges baked into the exported file.
+A powerful desktop video editor for repurposing a single source video **or static image** into multiple platform-sized outputs (Instagram, TikTok, YouTube, etc.) with text, icon overlays, and compliance badges.
 
-Everything runs in the browser — source media is never uploaded to a server.
+Everything runs locally on your PC — no media is ever uploaded to a server, and exports are powered by a high-performance FFmpeg-native pipeline.
 
 ## Features
 
-- Upload videos (MP4/WebM/MOV…) or static images (JPG/PNG/WebP…); mix them freely in the render queue.
-- 20+ built-in platform presets (Instagram, YouTube, Facebook, TikTok, LinkedIn, Twitter/X, Custom) — fully editable.
-- Four fit modes: Crop, Blur, Letterbox, Manual.
-- Text overlays with font / weight / alignment / padding / shadow or outline.
-- Compliance icon overlays driven by `public/config.json` with per-icon min-width constraints.
-- Optional outro video appended to every rendered **video** output (not applied to images).
-- Safe-zone overlays (preview-only) for platform UI awareness.
-- Configurable export settings (image format/quality, video format/bitrate/fps) via the Settings modal.
-- **PNG exports preserve transparency** in Letterbox and Manual (blur off) fit modes.
-- Source audio is preserved in video exports (canvas stream + captured audio track).
+- **Desktop Native:** Fast performance, native file dialogs, and robust drag-and-drop support.
+- **FFmpeg Integration:** High-quality video encoding using a bundled FFmpeg binary.
+- **Mix Media:** Upload videos (MP4/WebM/MOV…) or static images (JPG/PNG/WebP…); mix them freely in the render queue.
+- **Platform Presets:** 20+ built-in presets (Instagram, YouTube, TikTok, etc.) — fully editable.
+- **Fit Modes:** Crop, Blur, Letterbox, and Manual positioning.
+- **Smart Overlays:** Responsive text and icon overlays with per-icon constraints.
+- **Outro Support:** Automatically append an outro video to every rendered output.
+- **Privacy First:** All processing happens offline on your machine.
 
-## Tech stack
+## Tech Stack
 
-React 18 · Vite 6 · Tailwind 3 · lucide-react · Canvas 2D + `MediaRecorder` / `canvas.toBlob()` + Web Audio `MediaStreamDestination`.
+- **Frontend:** React 18 · Vite 6 · Tailwind 3 · lucide-react
+- **Desktop Core:** Tauri v2 (Rust)
+- **Render Engine:** FFmpeg-native (via Tauri IPC)
+- **Styling:** CSS Container Queries (`cqw` units) for responsive overlays
 
 ## Documentation
 
-- [User guide](docs/USER_GUIDE.md) — how to use the app.
-- [Developer docs](docs/DEVELOPERS.md) — architecture, render pipeline, config schema.
-- [Dependencies](docs/dependencies.md) — external libraries and resources used in dev and prod.
+- [User Guide](docs/USER_GUIDE.md) — How to use the app.
+- [Developer Docs](docs/DEVELOPERS.md) — Architecture, Tauri bridge, and build instructions.
+- [Dependencies](docs/dependencies.md) — Inventory of libraries and third-party resources.
 
-## Install & develop
+## Development
 
+### Prerequisites
+- Node.js (v18+)
+- Rust & Cargo (for Tauri)
+- WebView2 (Windows)
+
+### Setup & Run
 ```bash
 npm install
-npm run dev
+npm run tauri:dev
 ```
 
-Dev server runs at `http://localhost:5173`. The Vite dev server includes middleware that emulates the PHP config-save and file-listing endpoints so Settings → Save works locally.
+## Building for Production
 
-## Build & deploy
+To create a standalone Windows executable (`.exe` or `.msi`):
 
-1. **Build the production bundle:**
+```bash
+npm run tauri:build
+```
 
-   ```bash
-   npm run build
-   ```
+The installer will be generated in `src-tauri/target/release/bundle/`.
 
-   Vite writes the static bundle to `dist/`.
-
-2. **Copy the PHP backend and `.htaccess` into `dist/`:** the build does **not** include the server-side endpoints. After building, copy the entire contents of the `----files to be added to Dist after build/` folder into `dist/`. After copying, `dist/` should contain:
-
-   - `.htaccess` — rewrites `/api/<name>` → `/api/<name>.php` and SPA fallback to `index.html`
-   - `api/compliance-files.php`
-   - `api/safezone-files.php`
-   - `api/save-config.php`
-
-   These PHP scripts back the Settings modal: `compliance-files.php` and `safezone-files.php` list the files in `public/compliance/` and `public/safezones/`, and `save-config.php` writes the edited config back to `config.json`.
-
-3. **Upload `dist/` to your web host.** Everything under `dist/` (HTML, JS, CSS, `config.json`, `compliance/`, `safezones/`, `.htaccess`, and the `api/` folder you just copied) must be deployed to the webroot. Nothing outside `dist/` needs to go to the host.
-
-4. **Make `config.json` writable.** On static hosts (e.g. InfinityFree) the Settings → Save button needs `config.json` to be writable by PHP. If saving fails from the deployed app, set file permissions on `config.json` to `666`.
-
-### Browser requirements for export
-
-- MP4 video export requires Chrome or Edge (MP4 MediaRecorder output). Firefox and Safari fall back to WebM automatically.
-- Static image export (JPG/PNG) works in all modern browsers.
-- Audio capture uses the Web Audio API (`AudioContext` + `MediaStreamDestination`), supported in all current evergreen browsers.
-
-## Project layout
+## Project Layout
 
 ```
 .
-├── src/                 # React source
-├── public/              # Static assets served as-is
-│   ├── config.json      # Templates, compliance icons, export defaults
-│   ├── compliance/      # Compliance badge SVGs/PNGs
-│   └── safezones/       # Safe-zone reference images
-├── docs/                # User, developer, and dependency docs
-├── dist/                # Build output (generated by `npm run build`)
-└── ----files to be added to Dist after build/
-    ├── .htaccess        # Apache rewrites — copy into dist/ after building
-    └── api/             # PHP endpoints — copy into dist/ after building
+├── src/                 # React frontend
+│   ├── tauri-bridge.js  # Abstraction layer for desktop/web logic
+│   └── App.jsx          # Main application logic
+├── src-tauri/           # Tauri (Rust) configuration and commands
+├── public/              # Static assets (icons, safezones)
+├── docs/                # Documentation
+└── resources/           # Bundled app resources (config, ffmpeg)
 ```
+
