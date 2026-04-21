@@ -1,0 +1,59 @@
+{
+  "productName": "Batch Studio",
+  "version": "1.0.0",
+  "identifier": "com.batchstudio.app",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Batch Studio",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1024,
+        "minHeight": 640,
+        "decorations": true,
+        "resizable": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": ["**"],
+          "deny": []
+        }
+      }
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "resources/icons/icon.ico"
+    ],
+    "resources": {
+      "resources/compliance/*": "compliance/",
+      "resources/safezones/*": "safezones/",
+      "resources/config.json": "config.json",
+      "resources/fonts/*": "fonts/"
+    },
+    "externalBin": ["binaries/ffmpeg"],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    }
+  },
+  "plugins": {
+    "shell": {
+      "open": false
+    }
+  }
+}

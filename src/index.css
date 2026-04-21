@@ -1,0 +1,91 @@
+/* --- Locally bundled fonts for offline use --- */
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/Inter-Regular.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/Inter-Medium.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 600; font-display: swap; src: url('/fonts/Inter-SemiBold.woff2') format('woff2'); }
+@font-face { font-family: 'Inter'; font-style: normal; font-weight: 700; font-display: swap; src: url('/fonts/Inter-Bold.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 400; font-display: swap; src: url('/fonts/JetBrainsMono-Regular.woff2') format('woff2'); }
+@font-face { font-family: 'JetBrains Mono'; font-style: normal; font-weight: 500; font-display: swap; src: url('/fonts/JetBrainsMono-Medium.woff2') format('woff2'); }
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html, body { background: #0c0c0d; }
+  body { font-feature-settings: "cv11","ss01","ss03"; -webkit-font-smoothing: antialiased; }
+}
+
+@layer utilities {
+  .dot-bg {
+    background-image: radial-gradient(rgba(255,255,255,0.045) 1px, transparent 1px);
+    background-size: 22px 22px;
+  }
+  .checker {
+    background-image:
+      linear-gradient(45deg, #2a2a2f 25%, transparent 25%),
+      linear-gradient(-45deg, #2a2a2f 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, #2a2a2f 75%),
+      linear-gradient(-45deg, transparent 75%, #2a2a2f 75%);
+    background-size: 8px 8px;
+    background-position: 0 0, 0 4px, 4px -4px, -4px 0;
+  }
+  /* Scrollbar */
+  .scroll-thin::-webkit-scrollbar { width: 8px; height: 8px; }
+  .scroll-thin::-webkit-scrollbar-track { background: transparent; }
+  .scroll-thin::-webkit-scrollbar-thumb { background: #2a2a2f; border-radius: 8px; border: 2px solid transparent; background-clip: padding-box; }
+  .scroll-thin::-webkit-scrollbar-thumb:hover { background: #3a3a40; background-clip: padding-box; }
+
+  /* Number input custom spin buttons */
+  input[type="number"] {
+    -moz-appearance: textfield;
+  }
+  input[type="number"]::-webkit-inner-spin-button,
+  input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    appearance: none;
+    margin: 0;
+  }
+
+  /* Range slider */
+  input[type=range].slim { -webkit-appearance: none; appearance: none; background: transparent; height: 16px; }
+  input[type=range].slim::-webkit-slider-runnable-track {
+    height: 4px; background: #2a2a2f; border-radius: 999px;
+  }
+  input[type=range].slim::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; width: 14px; height: 14px; background: #fff; border-radius: 999px;
+    margin-top: -5px; box-shadow: 0 0 0 1px rgba(0,0,0,0.4), 0 1px 2px rgba(0,0,0,0.4);
+    cursor: pointer; transition: transform 0.15s ease;
+  }
+  input[type=range].slim::-webkit-slider-thumb:hover { transform: scale(1.15); }
+
+  /* Subtle section dividers without hard lines */
+  .hairline { box-shadow: 0 1px 0 rgba(255,255,255,0.05); }
+
+  /* Focus rings */
+  .focus-ring:focus { outline: none; box-shadow: 0 0 0 2px #0c0c0d, 0 0 0 4px rgba(99,102,241,0.5); }
+
+  /* Button & chip */
+  .chip {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 3px 8px; border-radius: 6px;
+    font-size: 11px; font-weight: 500;
+    background: rgba(255,255,255,0.04); color: #a8a8b0;
+    border: 1px solid rgba(255,255,255,0.06);
+  }
+
+  /* Fade in */
+  .fade-in { animation: fadeIn .25s ease both; }
+
+  /* Placeholder tile lines */
+  .placeholder-stripes {
+    background-image: repeating-linear-gradient(135deg, rgba(255,255,255,0.03) 0 12px, rgba(255,255,255,0.06) 12px 24px);
+  }
+
+  /* Kbd */
+  kbd { font-family: 'JetBrains Mono', monospace; font-size: 10px;
+    padding: 1px 5px; border-radius: 4px; background: #222226; color: #a8a8b0;
+    border: 1px solid rgba(255,255,255,0.06); box-shadow: 0 1px 0 rgba(0,0,0,0.3);
+  }
+}
+
+@keyframes fadeIn { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: none; } }
