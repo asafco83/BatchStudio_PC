@@ -7,6 +7,42 @@ import {
 } from 'lucide-react';
 import * as Bridge from './tauri-bridge';
 
+// --- Asset URL Hook ---
+// Resolves URLs for compliance icons and safezone images. In Tauri this
+// uses convertFileSrc against the writable asset folder so files added at
+// runtime work; in web/dev it falls back to /compliance/* and /safezones/*.
+function useAssetUrls() {
+  const [urls, setUrls] = useState({ compliance: {}, safezones: {} });
+  const [version, setVersion] = useState(0);
+
+  const refresh = React.useCallback(async () => {
+    const [comp, safe] = await Promise.all([
+      Bridge.getComplianceFiles().catch(() => []),
+      Bridge.getSafezoneFiles().catch(() => []),
+    ]);
+    const buildMap = async (kind, files) => {
+      const entries = await Promise.all(
+        files.map(async (f) => [f, await Bridge.getAssetUrl(kind, f)])
+      );
+      return Object.fromEntries(entries);
+    };
+    const [compMap, safeMap] = await Promise.all([
+      buildMap('compliance', comp),
+      buildMap('safezones', safe),
+    ]);
+    setUrls({ compliance: compMap, safezones: safeMap });
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh, version]);
+
+  const resolve = React.useCallback(
+    (kind, filename) => urls[kind]?.[filename] || (Bridge.isTauri ? '' : `/${kind}/${filename}`),
+    [urls]
+  );
+
+  return { urls, resolve, refresh, bumpVersion: () => setVersion(v => v + 1) };
+}
+
 // --- Config Hook ---
 function useConfig() {
   const [config, setConfig] = useState(null);
@@ -431,10 +467,18 @@ const encodeStaticImage = async (imageData, template, mode, texts, icons, manual
 // --- Main Application ---
 export default function WYSIWYGVideoEditor() {
   const { config, loading, saveConfig } = useConfig();
+  const assetUrls = useAssetUrls();
 
   const SOCIAL_TEMPLATES = useMemo(() => config ? config.templates : {}, [config]);
   const COMPLIANCE_ICONS = useMemo(() => config ? config.complianceIcons.map(i => i.filename) : [], [config]);
-  const DEFAULT_ICON_BASE_URL = config ? config.complianceIconsBaseUrl : '/compliance/';
+  const resolveIconUrl = React.useCallback(
+    (filename) => assetUrls.resolve('compliance', filename),
+    [assetUrls]
+  );
+  const resolveSafezoneUrl = React.useCallback(
+    (filename) => assetUrls.resolve('safezones', filename),
+    [assetUrls]
+  );
 
   const [videos, setVideos] = useState([]);
   const [selectedVideoId, setSelectedVideoId] = useState(null);
@@ -707,9 +751,11 @@ export default function WYSIWYGVideoEditor() {
 
   const addIconOverlay = () => {
     const firstCfg = config?.complianceIcons?.[0];
+    const firstName = COMPLIANCE_ICONS[0];
     const newIcon = {
       id: generateId(),
-      url: `${DEFAULT_ICON_BASE_URL}${COMPLIANCE_ICONS[0]}`,
+      filename: firstName,
+      url: resolveIconUrl(firstName),
       x: 10, y: 10, width: 15,
       opacity: 100,
       minWidth: firstCfg?.minWidth ?? null
@@ -1449,10 +1495,10 @@ export default function WYSIWYGVideoEditor() {
                         key={iconName}
                         onClick={() => {
                           const cfg = config?.complianceIcons?.find(ic => ic.filename === iconName);
-                          updateIconOverlay(activeIcon.id, { url: `${DEFAULT_ICON_BASE_URL}${iconName}`, minWidth: cfg?.minWidth ?? null });
+                          updateIconOverlay(activeIcon.id, { filename: iconName, url: resolveIconUrl(iconName), minWidth: cfg?.minWidth ?? null });
                         }}
                         className={`aspect-square rounded border flex items-center justify-center p-2 overflow-hidden transition-all relative ${
-                          activeIcon.url === `${DEFAULT_ICON_BASE_URL}${iconName}`
+                          activeIcon.filename === iconName || activeIcon.url === resolveIconUrl(iconName)
                             ? 'border-accent-ring ring-1 ring-blue-500 bg-ink-850'
                             : 'border-white/[0.08] hover:border-slate-500 bg-ink-900/80 hover:bg-ink-850'
                         }`}
@@ -1460,7 +1506,7 @@ export default function WYSIWYGVideoEditor() {
                       >
                         <div className="absolute inset-0 bg-checkerboard opacity-20 pointer-events-none"></div>
                         <img
-                          src={`${DEFAULT_ICON_BASE_URL}${iconName}`}
+                          src={resolveIconUrl(iconName)}
                           alt={iconName}
                           className="max-w-full max-h-full object-contain relative z-10"
                           onError={(e) => {
@@ -1603,6 +1649,7 @@ export default function WYSIWYGVideoEditor() {
               showSafeZone={showSafeZone}
               manualTransform={manualTransform}
               onManualTransformChange={setManualTransform}
+              resolveSafezoneUrl={resolveSafezoneUrl}
             />
           )}
         </div>
@@ -1722,6 +1769,7 @@ export default function WYSIWYGVideoEditor() {
           config={config}
           onSave={async (newConfig) => { await saveConfig(newConfig); setSettingsOpen(false); }}
           onClose={() => setSettingsOpen(false)}
+          onAssetsChanged={assetUrls.refresh}
         />
       )}
 
@@ -1768,7 +1816,7 @@ function PreviewCanvas({
   video, template, resizeMode,
   textOverlays, selectedTextId, setSelectedTextId, updateTextOverlay,
   iconOverlays, selectedIconId, setSelectedIconId, updateIconOverlay,
-  showSafeZone, manualTransform, onManualTransformChange
+  showSafeZone, manualTransform, onManualTransformChange, resolveSafezoneUrl
 }) {
   const isImage = video.type === 'image';
   const wrapperRef = useRef(null);
@@ -1981,7 +2029,7 @@ function PreviewCanvas({
 
           {showSafeZone && template.safeAreaImage && (
             <img
-              src={`/safezones/${template.safeAreaImage}`}
+              src={(resolveSafezoneUrl && resolveSafezoneUrl(template.safeAreaImage)) || `/safezones/${template.safeAreaImage}`}
               alt="Safe zone overlay"
               className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none z-40"
               draggable={false}
@@ -2306,7 +2354,7 @@ const DEFAULT_EXPORT = {
   video: { preferredFormat: 'auto', bitrate: 8000000, fps: 30, renderAudio: true }
 };
 
-function SettingsModal({ config, onSave, onClose }) {
+function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
   const [draft, setDraft] = useState(() => {
     const cloned = JSON.parse(JSON.stringify(config));
     cloned.export = {
@@ -2322,22 +2370,33 @@ function SettingsModal({ config, onSave, onClose }) {
   const [newGroupName, setNewGroupName] = useState('');
   const [addingGroup, setAddingGroup] = useState(false);
   const [safezoneFiles, setSafezoneFiles] = useState([]);
-  const dragGroupRef = useRef(null);
-  const dragTemplateRef = useRef(null);
+  const [iconUrls, setIconUrls] = useState({});
+  const [safezoneUrls, setSafezoneUrls] = useState({});
+  // Pending file deletions, applied on Save.
+  const [pendingDeleteIcons, setPendingDeleteIcons] = useState([]);
+  const [pendingDeleteSafezones, setPendingDeleteSafezones] = useState([]);
+  // Pointer-based drag reorder (HTML5 DnD is unreliable in WebView2 with
+  // window-level dragDropEnabled, so we track pointer events ourselves).
+  const groupNodes = useRef(new Map());
+  const templateNodes = useRef(new Map());
+  const [groupDrag, setGroupDrag] = useState(null);       // { from, overIdx }
+  const [templateDrag, setTemplateDrag] = useState(null); // { from, overIdx }
 
   const reorderGroups = (fromIdx, toIdx) => {
-    if (fromIdx === toIdx) return;
-    const keys = Object.keys(draft.templates);
-    const reordered = [...keys];
-    const [moved] = reordered.splice(fromIdx, 1);
-    reordered.splice(toIdx, 0, moved);
-    const newTemplates = {};
-    reordered.forEach(k => { newTemplates[k] = draft.templates[k]; });
-    setDraft(d => ({ ...d, templates: newTemplates }));
+    if (fromIdx == null || toIdx == null || fromIdx === toIdx) return;
+    setDraft(d => {
+      const keys = Object.keys(d.templates);
+      const reordered = [...keys];
+      const [moved] = reordered.splice(fromIdx, 1);
+      reordered.splice(toIdx, 0, moved);
+      const newTemplates = {};
+      reordered.forEach(k => { newTemplates[k] = d.templates[k]; });
+      return { ...d, templates: newTemplates };
+    });
   };
 
   const reorderTemplates = (platform, fromIdx, toIdx) => {
-    if (fromIdx === toIdx) return;
+    if (fromIdx == null || toIdx == null || fromIdx === toIdx) return;
     setDraft(d => {
       const arr = [...d.templates[platform]];
       const [moved] = arr.splice(fromIdx, 1);
@@ -2347,28 +2406,80 @@ function SettingsModal({ config, onSave, onClose }) {
   };
   const [complianceFiles, setComplianceFiles] = useState([]);
 
-  useEffect(() => {
-    Bridge.getSafezoneFiles().then(setSafezoneFiles).catch(() => {});
-    Bridge.getComplianceFiles().then(files => {
-      setComplianceFiles(files);
-      // Auto-merge: ensure every file in folder has a config entry
-      setDraft(d => {
-        const existing = d.complianceIcons || [];
-        const merged = files.map(filename => {
-          const found = existing.find(e => e.filename === filename);
-          return found || { filename, label: filename.replace(/\.[^.]+$/, ''), minWidth: 40, minHeight: 40 };
-        });
-        // Keep any config entries not in folder (remote URLs etc.)
-        const extras = existing.filter(e => !files.includes(e.filename));
-        return { ...d, complianceIcons: [...merged, ...extras] };
+  const refreshAssetUrls = async (compFiles, safeFiles) => {
+    const buildMap = async (kind, files) => {
+      const entries = await Promise.all(files.map(async f => [f, await Bridge.getAssetUrl(kind, f)]));
+      return Object.fromEntries(entries);
+    };
+    const [c, s] = await Promise.all([
+      buildMap('compliance', compFiles),
+      buildMap('safezones', safeFiles),
+    ]);
+    setIconUrls(c);
+    setSafezoneUrls(s);
+  };
+
+  const reloadAssetLists = async () => {
+    const [comp, safe] = await Promise.all([
+      Bridge.getComplianceFiles().catch(() => []),
+      Bridge.getSafezoneFiles().catch(() => []),
+    ]);
+    setComplianceFiles(comp);
+    setSafezoneFiles(safe);
+    setDraft(d => {
+      const existing = d.complianceIcons || [];
+      const merged = comp.map(filename => {
+        const found = existing.find(e => e.filename === filename);
+        return found || { filename, label: filename.replace(/\.[^.]+$/, ''), minWidth: 40, minHeight: 40 };
       });
-    }).catch(() => {});
+      const extras = existing.filter(e => !comp.includes(e.filename));
+      return { ...d, complianceIcons: [...merged, ...extras] };
+    });
+    await refreshAssetUrls(comp, safe);
+  };
+
+  useEffect(() => {
+    reloadAssetLists();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSave = async () => {
     setSaveError(null);
     try {
-      await onSave(draft);
+      // Apply pending file deletions first. Clear image URLs before deleting
+      // so WebView2 releases any handles on the asset files.
+      if (Bridge.isTauri) {
+        if (pendingDeleteIcons.length > 0 || pendingDeleteSafezones.length > 0) {
+          setIconUrls({});
+          setSafezoneUrls({});
+          // Yield a frame so React unmounts the <img> tags first.
+          await new Promise(r => setTimeout(r, 50));
+        }
+        for (const f of pendingDeleteIcons) {
+          await Bridge.deleteAssetFile('compliance', f);
+        }
+        for (const f of pendingDeleteSafezones) {
+          await Bridge.deleteAssetFile('safezones', f);
+        }
+      }
+      // Drop config entries that point to deleted files
+      const cleaned = {
+        ...draft,
+        complianceIcons: (draft.complianceIcons || []).filter(ic => !pendingDeleteIcons.includes(ic.filename)),
+        templates: Object.fromEntries(
+          Object.entries(draft.templates || {}).map(([k, arr]) => [
+            k,
+            arr.map(t => pendingDeleteSafezones.includes(t.safeAreaImage)
+              ? (() => { const { safeAreaImage, ...rest } = t; return rest; })()
+              : t),
+          ])
+        ),
+      };
+      await onSave(cleaned);
+      setPendingDeleteIcons([]);
+      setPendingDeleteSafezones([]);
+      await reloadAssetLists();
+      onAssetsChanged && onAssetsChanged();
       setSavedIndicator(true);
       setTimeout(() => setSavedIndicator(false), 2000);
     } catch (err) {
@@ -2376,7 +2487,93 @@ function SettingsModal({ config, onSave, onClose }) {
     }
   };
 
-  const updateBaseUrl = (val) => setDraft(d => ({ ...d, complianceIconsBaseUrl: val }));
+  const handleAddIconFiles = async () => {
+    const paths = await Bridge.pickImageFiles(true);
+    if (!paths) return;
+    for (const p of paths) {
+      try {
+        await Bridge.addAssetFile('compliance', p);
+      } catch (err) {
+        setSaveError(err.message || 'Failed to add file');
+      }
+    }
+    await reloadAssetLists();
+    onAssetsChanged && onAssetsChanged();
+  };
+
+  const handleAddSafezoneFiles = async () => {
+    const paths = await Bridge.pickImageFiles(true);
+    if (!paths) return;
+    for (const p of paths) {
+      try {
+        await Bridge.addAssetFile('safezones', p);
+      } catch (err) {
+        setSaveError(err.message || 'Failed to add file');
+      }
+    }
+    await reloadAssetLists();
+    onAssetsChanged && onAssetsChanged();
+  };
+
+  const togglePendingDeleteIcon = (filename) => {
+    setPendingDeleteIcons(p => p.includes(filename) ? p.filter(f => f !== filename) : [...p, filename]);
+  };
+
+  const togglePendingDeleteSafezone = (filename) => {
+    setPendingDeleteSafezones(p => p.includes(filename) ? p.filter(f => f !== filename) : [...p, filename]);
+  };
+
+  // ---- Pointer-based drag reorder helpers ----
+  const startReorder = (kind, idx) => (e) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (kind === 'group') setGroupDrag({ from: idx, overIdx: idx });
+    else setTemplateDrag({ from: idx, overIdx: idx });
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'grabbing';
+  };
+
+  useEffect(() => {
+    if (!groupDrag && !templateDrag) return;
+    const computeTarget = (clientY, nodes) => {
+      let target = null;
+      nodes.forEach((node, idx) => {
+        if (!node) return;
+        const r = node.getBoundingClientRect();
+        if (clientY >= r.top && clientY <= r.bottom) target = idx;
+      });
+      return target;
+    };
+    const onMove = (e) => {
+      if (groupDrag) {
+        const t = computeTarget(e.clientY, groupNodes.current);
+        if (t != null && t !== groupDrag.overIdx) setGroupDrag(d => d ? { ...d, overIdx: t } : d);
+      }
+      if (templateDrag) {
+        const t = computeTarget(e.clientY, templateNodes.current);
+        if (t != null && t !== templateDrag.overIdx) setTemplateDrag(d => d ? { ...d, overIdx: t } : d);
+      }
+    };
+    const onUp = () => {
+      if (groupDrag && groupDrag.from !== groupDrag.overIdx) {
+        reorderGroups(groupDrag.from, groupDrag.overIdx);
+      }
+      if (templateDrag && templateDrag.from !== templateDrag.overIdx) {
+        reorderTemplates(activePlatform, templateDrag.from, templateDrag.overIdx);
+      }
+      setGroupDrag(null);
+      setTemplateDrag(null);
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+    };
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+    return () => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+    };
+  }, [groupDrag, templateDrag, activePlatform]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const updateIcon = (idx, field, val) => {
     setDraft(d => {
@@ -2488,39 +2685,46 @@ function SettingsModal({ config, onSave, onClose }) {
               className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'icons' ? 'bg-accent-bg text-accent-soft' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-100'}`}
             >Compliance Icons</button>
             <button
+              onClick={() => setActiveTab('safezones')}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'safezones' ? 'bg-accent-bg text-accent-soft' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-100'}`}
+            >Safezones</button>
+            <button
               onClick={() => setActiveTab('templates')}
               className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'templates' ? 'bg-accent-bg text-accent-soft' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-100'}`}
             >Output Templates</button>
-            <button
-              onClick={() => setActiveTab('export')}
-              className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'export' ? 'bg-accent-bg text-accent-soft' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-100'}`}
-            >Export</button>
 
             {activeTab === 'templates' && (
               <div className="mt-1 ml-1 border-l border-white/[0.08] pl-2 flex flex-col gap-0.5">
-                {platformNames.map((name, idx) => (
-                  <div
-                    key={name}
-                    draggable
-                    onDragStart={() => { dragGroupRef.current = idx; }}
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={(e) => { e.preventDefault(); reorderGroups(dragGroupRef.current, idx); dragGroupRef.current = null; }}
-                    className="flex items-center group cursor-default"
-                  >
-                    <GripVertical size={11} className="text-slate-700 group-hover:text-ink-500 shrink-0 cursor-grab mr-0.5" />
-                    <button
-                      onClick={() => setActivePlatform(name)}
-                      className={`flex-1 text-left px-1.5 py-1.5 rounded text-xs font-medium transition-colors truncate ${activePlatform === name ? 'text-accent-soft bg-blue-500/10' : 'text-ink-500 hover:text-ink-100 hover:bg-ink-850'}`}
-                    >{name}</button>
-                    {name !== 'Custom' && (
+                {platformNames.map((name, idx) => {
+                  const isOver = groupDrag && groupDrag.overIdx === idx && groupDrag.from !== idx;
+                  const isDragging = groupDrag && groupDrag.from === idx;
+                  return (
+                    <div
+                      key={name}
+                      ref={(node) => { if (node) groupNodes.current.set(idx, node); else groupNodes.current.delete(idx); }}
+                      className={`flex items-center group cursor-default rounded ${isOver ? 'bg-blue-500/20 ring-1 ring-accent-ring' : ''} ${isDragging ? 'opacity-50' : ''}`}
+                    >
+                      <span
+                        onPointerDown={startReorder('group', idx)}
+                        className="shrink-0 px-0.5 py-1.5 cursor-grab active:cursor-grabbing touch-none"
+                        title="Drag to reorder"
+                      >
+                        <GripVertical size={11} className="text-slate-700 group-hover:text-ink-500" />
+                      </span>
                       <button
-                        onClick={() => deleteGroup(name)}
-                        className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 p-0.5 rounded transition-all shrink-0"
-                        title="Delete group"
-                      ><Trash2 size={11} /></button>
-                    )}
-                  </div>
-                ))}
+                        onClick={() => setActivePlatform(name)}
+                        className={`flex-1 text-left px-1.5 py-1.5 rounded text-xs font-medium transition-colors truncate ${activePlatform === name ? 'text-accent-soft bg-blue-500/10' : 'text-ink-500 hover:text-ink-100 hover:bg-ink-850'}`}
+                      >{name}</button>
+                      {name !== 'Custom' && (
+                        <button
+                          onClick={() => deleteGroup(name)}
+                          className="opacity-0 group-hover:opacity-100 text-red-500 hover:text-red-400 p-0.5 rounded transition-all shrink-0"
+                          title="Delete group"
+                        ><Trash2 size={11} /></button>
+                      )}
+                    </div>
+                  );
+                })}
                 {addingGroup ? (
                   <div className="flex items-center gap-1 mt-1">
                     <input
@@ -2543,44 +2747,63 @@ function SettingsModal({ config, onSave, onClose }) {
                 )}
               </div>
             )}
+
+            <button
+              onClick={() => setActiveTab('export')}
+              className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'export' ? 'bg-accent-bg text-accent-soft' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-100'}`}
+            >Export</button>
           </nav>
 
           {/* Right scrollable content */}
           <div className="flex-1 overflow-y-auto p-5 custom-scrollbar">
           {activeTab === 'icons' && (
             <div className="space-y-4">
-              <div>
-                <label className="text-xs text-ink-400 block mb-1">Base URL</label>
-                <input
-                  type="text"
-                  value={draft.complianceIconsBaseUrl}
-                  onChange={(e) => updateBaseUrl(e.target.value)}
-                  className="w-full bg-ink-850 border border-white/[0.08] rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus-ring"
-                />
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-ink-500">
+                  {complianceFiles.length > 0
+                    ? `${complianceFiles.length} file${complianceFiles.length !== 1 ? 's' : ''} in the compliance folder.`
+                    : 'No files in the compliance folder yet.'}
+                </p>
+                {Bridge.isTauri && (
+                  <button
+                    onClick={handleAddIconFiles}
+                    className="text-xs flex items-center gap-1 bg-accent hover:bg-accent-soft text-white px-3 py-1.5 rounded-lg transition-colors"
+                  ><Plus size={13} /> Add Icon</button>
+                )}
               </div>
-              <p className="text-[10px] text-ink-500">
-                {complianceFiles.length > 0
-                  ? `${complianceFiles.length} file${complianceFiles.length !== 1 ? 's' : ''} found in compliance folder. Add/remove icons by managing files there.`
-                  : 'No files detected in compliance folder. Drop image files there to populate this list.'}
-              </p>
+              {pendingDeleteIcons.length > 0 && (
+                <p className="text-[10px] text-yellow-500">
+                  {pendingDeleteIcons.length} file{pendingDeleteIcons.length !== 1 ? 's' : ''} marked for deletion. They will be removed from the folder when you click Save.
+                </p>
+              )}
               <div className="space-y-2">
                 {draft.complianceIcons.map((icon, idx) => {
                   const inFolder = complianceFiles.includes(icon.filename);
+                  const markedForDelete = pendingDeleteIcons.includes(icon.filename);
                   return (
-                    <div key={idx} className={`bg-ink-850 border rounded-lg p-3 space-y-2 ${inFolder ? 'border-white/[0.08]' : 'border-yellow-700/50'}`}>
+                    <div key={idx} className={`bg-ink-850 border rounded-lg p-3 space-y-2 ${markedForDelete ? 'border-red-700/60 opacity-60' : inFolder ? 'border-white/[0.08]' : 'border-yellow-700/50'}`}>
                       <div className="flex items-center gap-2">
                         <img
-                          src={draft.complianceIconsBaseUrl + icon.filename}
+                          src={iconUrls[icon.filename] || ''}
                           className="w-9 h-9 object-contain bg-ink-700 rounded shrink-0 border border-slate-600"
                           onError={(e) => { e.target.style.opacity = '0.2'; }}
                         />
                         <div className="flex-1 min-w-0">
                           <p className="text-xs text-ink-100 font-mono truncate">{icon.filename}</p>
                           {!inFolder && <p className="text-[10px] text-yellow-500">Not found in folder</p>}
+                          {markedForDelete && <p className="text-[10px] text-red-400">Will be deleted on Save</p>}
                         </div>
-                        <button onClick={() => deleteIcon(idx)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
-                          <Trash2 size={13} />
-                        </button>
+                        {Bridge.isTauri && inFolder ? (
+                          <button
+                            onClick={() => togglePendingDeleteIcon(icon.filename)}
+                            className={`transition-colors shrink-0 ${markedForDelete ? 'text-red-400 hover:text-red-300' : 'text-slate-600 hover:text-red-400'}`}
+                            title={markedForDelete ? 'Undo delete' : 'Delete file from folder on save'}
+                          ><Trash2 size={13} /></button>
+                        ) : (
+                          <button onClick={() => deleteIcon(idx)} className="text-slate-600 hover:text-red-400 transition-colors shrink-0">
+                            <Trash2 size={13} />
+                          </button>
+                        )}
                       </div>
                       <div className="grid grid-cols-3 gap-2">
                         <div className="col-span-3">
@@ -2621,21 +2844,81 @@ function SettingsModal({ config, onSave, onClose }) {
             </div>
           )}
 
+          {activeTab === 'safezones' && (
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <p className="text-[11px] text-ink-500">
+                  {safezoneFiles.length > 0
+                    ? `${safezoneFiles.length} file${safezoneFiles.length !== 1 ? 's' : ''} in the safezones folder.`
+                    : 'No files in the safezones folder yet.'}
+                </p>
+                {Bridge.isTauri && (
+                  <button
+                    onClick={handleAddSafezoneFiles}
+                    className="text-xs flex items-center gap-1 bg-accent hover:bg-accent-soft text-white px-3 py-1.5 rounded-lg transition-colors"
+                  ><Plus size={13} /> Add Safezone</button>
+                )}
+              </div>
+              {pendingDeleteSafezones.length > 0 && (
+                <p className="text-[10px] text-yellow-500">
+                  {pendingDeleteSafezones.length} file{pendingDeleteSafezones.length !== 1 ? 's' : ''} marked for deletion. They will be removed from the folder when you click Save.
+                </p>
+              )}
+              <div className="space-y-2">
+                {safezoneFiles.map(filename => {
+                  const markedForDelete = pendingDeleteSafezones.includes(filename);
+                  return (
+                    <div key={filename} className={`bg-ink-850 border rounded-lg p-3 flex items-center gap-2 ${markedForDelete ? 'border-red-700/60 opacity-60' : 'border-white/[0.08]'}`}>
+                      <img
+                        src={safezoneUrls[filename] || ''}
+                        className="w-12 h-12 object-contain bg-ink-700 rounded shrink-0 border border-slate-600"
+                        onError={(e) => { e.target.style.opacity = '0.2'; }}
+                        alt={filename}
+                      />
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-ink-100 font-mono truncate" title={filename}>{filename}</p>
+                        {markedForDelete && <p className="text-[10px] text-red-400">Will be deleted on Save</p>}
+                      </div>
+                      {Bridge.isTauri && (
+                        <button
+                          onClick={() => togglePendingDeleteSafezone(filename)}
+                          className={`transition-colors shrink-0 ${markedForDelete ? 'text-red-400 hover:text-red-300' : 'text-slate-600 hover:text-red-400'}`}
+                          title={markedForDelete ? 'Undo delete' : 'Delete file from folder on save'}
+                        ><Trash2 size={13} /></button>
+                      )}
+                    </div>
+                  );
+                })}
+                {safezoneFiles.length === 0 && (
+                  <div className="text-center text-xs text-ink-500 py-6 border border-dashed border-white/[0.08] rounded-lg">
+                    No safezone images yet.
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === 'templates' && (
             <div className="space-y-4">
               {activePlatform && draft.templates[activePlatform] && (
                 <div className="space-y-2">
-                  {draft.templates[activePlatform].map((t, idx) => (
+                  {draft.templates[activePlatform].map((t, idx) => {
+                    const isOver = templateDrag && templateDrag.overIdx === idx && templateDrag.from !== idx;
+                    const isDragging = templateDrag && templateDrag.from === idx;
+                    return (
                     <div
                       key={t.id || idx}
-                      draggable
-                      onDragStart={() => { dragTemplateRef.current = idx; }}
-                      onDragOver={(e) => e.preventDefault()}
-                      onDrop={(e) => { e.preventDefault(); reorderTemplates(activePlatform, dragTemplateRef.current, idx); dragTemplateRef.current = null; }}
-                      className="bg-ink-850 border border-white/[0.08] rounded-lg p-3 space-y-2"
+                      ref={(node) => { if (node) templateNodes.current.set(idx, node); else templateNodes.current.delete(idx); }}
+                      className={`bg-ink-850 border rounded-lg p-3 space-y-2 ${isOver ? 'border-accent-ring ring-1 ring-accent-ring' : 'border-white/[0.08]'} ${isDragging ? 'opacity-50' : ''}`}
                     >
                       <div className="flex items-center gap-2">
-                        <GripVertical size={14} className="text-slate-600 hover:text-ink-400 cursor-grab shrink-0" />
+                        <span
+                          onPointerDown={startReorder('template', idx)}
+                          className="shrink-0 cursor-grab active:cursor-grabbing touch-none p-1"
+                          title="Drag to reorder"
+                        >
+                          <GripVertical size={14} className="text-slate-600 hover:text-ink-400" />
+                        </span>
                         <input
                           type="text"
                           value={t.name}
@@ -2716,7 +2999,7 @@ function SettingsModal({ config, onSave, onClose }) {
                           </select>
                           {t.safeAreaImage && (
                             <img
-                              src={`/safezones/${t.safeAreaImage}`}
+                              src={safezoneUrls[t.safeAreaImage] || `/safezones/${t.safeAreaImage}`}
                               alt="preview"
                               className="w-8 h-8 object-contain rounded border border-slate-600 shrink-0 bg-ink-850"
                             />
@@ -2724,7 +3007,8 @@ function SettingsModal({ config, onSave, onClose }) {
                         </div>
                       </div>
                     </div>
-                  ))}
+                  );
+                  })}
                   <button
                     onClick={() => addTemplate(activePlatform)}
                     className="text-xs flex items-center gap-1 bg-ink-850 hover:bg-ink-700 px-3 py-2 rounded-lg text-ink-100 transition-colors border border-white/[0.08] w-full justify-center"

@@ -97,6 +97,66 @@ export async function getSafezoneFiles() {
 }
 
 // ---------------------------------------------------------------------------
+// Asset management (compliance icons & safezone images)
+// ---------------------------------------------------------------------------
+
+const _assetDirCache = {};
+
+async function getAssetDir(kind) {
+  if (!isTauri) return null;
+  if (_assetDirCache[kind]) return _assetDirCache[kind];
+  const { invoke } = await core();
+  const dir = await invoke('get_asset_dir', { kind });
+  _assetDirCache[kind] = dir;
+  return dir;
+}
+
+/**
+ * Resolve a public URL for an asset file (compliance or safezones).
+ * In Tauri, returns a `convertFileSrc` URL pointing at the writable
+ * folder so files added at runtime work. In web/dev mode, returns
+ * the legacy `/<kind>/<filename>` path served by Vite.
+ */
+export async function getAssetUrl(kind, filename) {
+  if (!filename) return '';
+  if (isTauri) {
+    const dir = await getAssetDir(kind);
+    if (!dir) return '';
+    const sep = dir.includes('\\') ? '\\' : '/';
+    const fullPath = `${dir}${sep}${filename}`;
+    const c = await core();
+    return c.convertFileSrc(fullPath);
+  }
+  return `/${kind}/${filename}`;
+}
+
+export async function addAssetFile(kind, sourcePath) {
+  if (!isTauri) throw new Error('Adding asset files requires the desktop app');
+  const { invoke } = await core();
+  return invoke('add_asset_file', { kind, sourcePath });
+}
+
+export async function deleteAssetFile(kind, filename) {
+  if (!isTauri) return;
+  const { invoke } = await core();
+  return invoke('delete_asset_file', { kind, filename });
+}
+
+/**
+ * Open a file picker scoped to image files (for compliance / safezone uploads).
+ */
+export async function pickImageFiles(multiple = true) {
+  if (!isTauri) return null;
+  const { open } = await dialog();
+  const result = await open({
+    multiple,
+    filters: [{ name: 'Image Files', extensions: ['png', 'jpg', 'jpeg', 'svg', 'webp', 'gif'] }],
+  });
+  if (!result) return null;
+  return Array.isArray(result) ? result : [result];
+}
+
+// ---------------------------------------------------------------------------
 // File Picking
 // ---------------------------------------------------------------------------
 

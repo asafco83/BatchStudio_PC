@@ -75,23 +75,84 @@ fn list_images(dir: &PathBuf) -> Vec<String> {
         .collect()
 }
 
-/// Try multiple candidate directories — resource dir first, then CWD.
-fn find_asset_dir(app: &AppHandle, sub: &str) -> Vec<String> {
-    let candidates: Vec<PathBuf> = [
-        app.path().resource_dir().ok().map(|p| p.join(sub)),
-        std::env::current_dir().ok().map(|p| p.join("public").join(sub)),
-        std::env::current_dir().ok().map(|p| p.join("..").join("public").join(sub)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+/// Probe writability by attempting to create + delete a tiny file.
+fn is_writable(dir: &PathBuf) -> bool {
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(".batchstudio_write_probe");
+    if fs::write(&probe, b"x").is_ok() {
+        let _ = fs::remove_file(&probe);
+        true
+    } else {
+        false
+    }
+}
 
-    for dir in candidates {
-        if dir.exists() {
-            return list_images(&dir);
+/// Seed a directory from the bundled resources / dev `public/` folder if
+/// it's currently empty.
+fn seed_asset_dir(app: &AppHandle, target: &PathBuf, sub: &str) {
+    let already_has_files = fs::read_dir(target)
+        .map(|it| it.flatten().next().is_some())
+        .unwrap_or(false);
+    if already_has_files {
+        return;
+    }
+    if let Ok(res) = app.path().resource_dir() {
+        let src = res.join(sub);
+        if src.exists() {
+            if let Ok(entries) = fs::read_dir(&src) {
+                for entry in entries.flatten() {
+                    let to = target.join(entry.file_name());
+                    let _ = fs::copy(&entry.path(), &to);
+                }
+                return;
+            }
         }
     }
-    Vec::new()
+    if let Ok(cwd) = std::env::current_dir() {
+        for base_dir in [cwd.join("public").join(sub), cwd.join("..").join("public").join(sub)] {
+            if base_dir.exists() {
+                if let Ok(entries) = fs::read_dir(&base_dir) {
+                    for entry in entries.flatten() {
+                        let to = target.join(entry.file_name());
+                        let _ = fs::copy(&entry.path(), &to);
+                    }
+                }
+                return;
+            }
+        }
+    }
+}
+
+/// Returns the writable asset directory for a given subfolder
+/// (e.g. "compliance", "safezones").
+///
+/// Strategy:
+/// 1. Prefer the folder next to the running executable (portable layout —
+///    so a portable .zip can be moved around and stay self-contained).
+/// 2. Fall back to the per-user app-data dir when the exe folder is
+///    read-only (e.g. an installed app under Program Files).
+///
+/// The directory is seeded from the bundled resources on first use.
+fn writable_asset_dir(app: &AppHandle, sub: &str) -> Result<PathBuf, String> {
+    // 1) Portable: <exe_dir>/<sub>
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join(sub);
+            if is_writable(&candidate) {
+                seed_asset_dir(app, &candidate, sub);
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // 2) Installed: app_data_dir/<sub>
+    let base = data_dir(app)?;
+    let target = base.join(sub);
+    fs::create_dir_all(&target).map_err(|e| e.to_string())?;
+    seed_asset_dir(app, &target, sub);
+    Ok(target)
 }
 
 // ---------------------------------------------------------------------------
@@ -118,12 +179,82 @@ fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), String> 
 
 #[tauri::command]
 fn list_compliance_files(app: AppHandle) -> Vec<String> {
-    find_asset_dir(&app, "compliance")
+    writable_asset_dir(&app, "compliance")
+        .map(|d| list_images(&d))
+        .unwrap_or_default()
 }
 
 #[tauri::command]
 fn list_safezone_files(app: AppHandle) -> Vec<String> {
-    find_asset_dir(&app, "safezones")
+    writable_asset_dir(&app, "safezones")
+        .map(|d| list_images(&d))
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+fn get_asset_dir(app: AppHandle, kind: String) -> Result<String, String> {
+    let sub = match kind.as_str() {
+        "compliance" => "compliance",
+        "safezones" => "safezones",
+        _ => return Err(format!("Unknown asset kind: {kind}")),
+    };
+    let dir = writable_asset_dir(&app, sub)?;
+    Ok(dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn add_asset_file(app: AppHandle, kind: String, source_path: String) -> Result<String, String> {
+    let sub = match kind.as_str() {
+        "compliance" => "compliance",
+        "safezones" => "safezones",
+        _ => return Err(format!("Unknown asset kind: {kind}")),
+    };
+    let dir = writable_asset_dir(&app, sub)?;
+    let src = PathBuf::from(&source_path);
+    let file_name = src
+        .file_name()
+        .ok_or_else(|| "Invalid source path".to_string())?
+        .to_string_lossy()
+        .to_string();
+
+    // Ensure unique destination filename
+    let mut dest = dir.join(&file_name);
+    if dest.exists() {
+        let stem = src.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let ext = src.extension().map(|s| format!(".{}", s.to_string_lossy())).unwrap_or_default();
+        let mut counter = 2;
+        loop {
+            let candidate = dir.join(format!("{stem}_{counter}{ext}"));
+            if !candidate.exists() {
+                dest = candidate;
+                break;
+            }
+            counter += 1;
+            if counter > 9999 { break; }
+        }
+    }
+
+    fs::copy(&src, &dest).map_err(|e| e.to_string())?;
+    Ok(dest.file_name().unwrap().to_string_lossy().to_string())
+}
+
+#[tauri::command]
+fn delete_asset_file(app: AppHandle, kind: String, filename: String) -> Result<(), String> {
+    let sub = match kind.as_str() {
+        "compliance" => "compliance",
+        "safezones" => "safezones",
+        _ => return Err(format!("Unknown asset kind: {kind}")),
+    };
+    let dir = writable_asset_dir(&app, sub)?;
+    let target = dir.join(&filename);
+    // Disallow path traversal
+    if !target.starts_with(&dir) {
+        return Err("Invalid filename".to_string());
+    }
+    if target.exists() {
+        fs::remove_file(&target).map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +630,9 @@ pub fn run() {
             save_config,
             list_compliance_files,
             list_safezone_files,
+            get_asset_dir,
+            add_asset_file,
+            delete_asset_file,
             create_render_session,
             encode_video,
             encode_video_direct,
