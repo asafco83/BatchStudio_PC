@@ -315,6 +315,12 @@ export async function concatVideos(inputPaths, outputPath) {
   return invoke('concat_videos', { inputPaths, outputPath });
 }
 
+export async function cancelRender() {
+  if (!isTauri) return;
+  const { invoke } = await core();
+  return invoke('cancel_render');
+}
+
 export async function cleanupSession(sessionId) {
   const { invoke } = await core();
   return invoke('cleanup_session', { sessionId });

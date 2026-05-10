@@ -1,7 +1,7 @@
 {
   "productName": "Batch Studio",
   "version": "1.0.0",
-  "identifier": "com.batchstudio.app",
+  "identifier": "com.batchstudio.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5173",

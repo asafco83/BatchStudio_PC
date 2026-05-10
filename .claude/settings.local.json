@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(@\\('node_modules','src-tauri\\\\target','public\\\\fonts','public\\\\compliance','public\\\\safezones','dist'\\) | ForEach-Object { \"$_ : $\\(Test-Path $_\\)\" })",
+      "PowerShell(node --version)",
+      "PowerShell(npm --version)",
+      "PowerShell(cargo --version)",
+      "PowerShell(rustc --version)",
+      "PowerShell(\\(Get-Item src\\\\App.jsx\\).Length; \\(Get-Item src\\\\App.jsx\\).LastWriteTime)"
+    ]
+  }
+}

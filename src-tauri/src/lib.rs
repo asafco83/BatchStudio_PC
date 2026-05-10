@@ -1,10 +1,12 @@
 use serde::Serialize;
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_shell::ShellExt;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 
 // ---------------------------------------------------------------------------
 // State
@@ -14,9 +16,204 @@ struct RenderSession {
     temp_dir: PathBuf,
 }
 
-#[derive(Default)]
 pub struct AppState {
     sessions: Mutex<HashMap<String, RenderSession>>,
+    active_ffmpeg: Mutex<Option<CommandChild>>,
+}
+
+// ---------------------------------------------------------------------------
+// Security: Input Validation
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed export dimensions (8K) to prevent resource exhaustion.
+const MAX_EXPORT_WIDTH: u32 = 7680;
+const MAX_EXPORT_HEIGHT: u32 = 4320;
+/// Maximum allowed FPS.
+const MAX_FPS: u32 = 120;
+/// Maximum allowed bitrate (50 Mbps).
+const MAX_BITRATE: u64 = 50_000_000;
+/// Allowed video output formats.
+const ALLOWED_FORMATS: &[&str] = &["mp4", "webm"];
+/// Allowed resize modes.
+const ALLOWED_RESIZE_MODES: &[&str] = &["blur", "crop", "fill", "black", "fit", "manual"];
+
+/// Validate numeric render parameters are within sane ranges.
+fn validate_render_params(width: u32, height: u32, fps: u32, bitrate: u64, format: &str) -> Result<(), String> {
+    if width == 0 || width > MAX_EXPORT_WIDTH {
+        return Err(format!("Width must be between 1 and {MAX_EXPORT_WIDTH}, got {width}"));
+    }
+    if height == 0 || height > MAX_EXPORT_HEIGHT {
+        return Err(format!("Height must be between 1 and {MAX_EXPORT_HEIGHT}, got {height}"));
+    }
+    if fps == 0 || fps > MAX_FPS {
+        return Err(format!("FPS must be between 1 and {MAX_FPS}, got {fps}"));
+    }
+    if bitrate == 0 || bitrate > MAX_BITRATE {
+        return Err(format!("Bitrate must be between 1 and {MAX_BITRATE}, got {bitrate}"));
+    }
+    if !ALLOWED_FORMATS.contains(&format) {
+        return Err(format!("Format must be one of {:?}, got '{format}'", ALLOWED_FORMATS));
+    }
+    Ok(())
+}
+
+/// Validate that a file exists and its magic bytes match known media formats.
+/// This prevents processing of crafted/malicious files that masquerade as media.
+fn validate_media_file(path: &str) -> Result<(), String> {
+    let p = PathBuf::from(path);
+    if !p.exists() {
+        return Err(format!("File does not exist: {path}"));
+    }
+
+    let mut file = fs::File::open(&p).map_err(|e| format!("Cannot open file: {e}"))?;
+    let mut header = [0u8; 12];
+    let bytes_read = file.read(&mut header).map_err(|e| format!("Cannot read file header: {e}"))?;
+
+    if bytes_read < 4 {
+        return Err("File too small to be valid media".to_string());
+    }
+
+    // Check magic bytes for known media formats
+    let is_valid = matches!(
+        &header[..4],
+        // JPEG
+        [0xFF, 0xD8, 0xFF, _] |
+        // PNG
+        [0x89, 0x50, 0x4E, 0x47] |
+        // GIF87a / GIF89a
+        [0x47, 0x49, 0x46, 0x38] |
+        // BMP
+        [0x42, 0x4D, _, _] |
+        // RIFF container (WebP or AVI — further checked below)
+        [0x52, 0x49, 0x46, 0x46]
+    ) || is_mp4_or_mov(&header, bytes_read)
+      || is_webm_mkv(&header, bytes_read)
+      || is_avi(&header, bytes_read)
+      || is_flv(&header, bytes_read)
+      || is_svg(&p);
+
+    if !is_valid {
+        return Err(format!("File does not appear to be a valid media file: {path}"));
+    }
+
+    Ok(())
+}
+
+fn is_mp4_or_mov(header: &[u8; 12], len: usize) -> bool {
+    if len < 8 { return false; }
+    // ftyp box: bytes 4-7 should be "ftyp"
+    &header[4..8] == b"ftyp"
+    // moov box at start (some MOV files)
+    || &header[4..8] == b"moov"
+    // mdat box at start
+    || &header[4..8] == b"mdat"
+    // wide box (older QuickTime)
+    || &header[4..8] == b"wide"
+    // free box
+    || &header[4..8] == b"free"
+}
+
+fn is_webm_mkv(header: &[u8; 12], len: usize) -> bool {
+    if len < 4 { return false; }
+    // EBML header (WebM/MKV)
+    header[0] == 0x1A && header[1] == 0x45 && header[2] == 0xDF && header[3] == 0xA3
+}
+
+fn is_avi(header: &[u8; 12], len: usize) -> bool {
+    if len < 12 { return false; }
+    // RIFF....AVI
+    &header[0..4] == b"RIFF" && &header[8..12] == b"AVI "
+}
+
+fn is_flv(header: &[u8; 12], len: usize) -> bool {
+    if len < 3 { return false; }
+    // FLV signature
+    &header[0..3] == b"FLV"
+}
+
+fn is_svg(path: &PathBuf) -> bool {
+    // SVG files are text-based; check extension and first bytes for XML/SVG markers
+    let ext = path.extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    if ext != "svg" { return false; }
+    // Read first 256 bytes to check for SVG markers
+    if let Ok(mut f) = fs::File::open(path) {
+        let mut buf = [0u8; 256];
+        if let Ok(n) = f.read(&mut buf) {
+            let content = String::from_utf8_lossy(&buf[..n]).to_lowercase();
+            return content.contains("<svg") || content.contains("<?xml");
+        }
+    }
+    false
+}
+
+/// Validate config.json structure and value ranges.
+fn validate_config(config: &serde_json::Value) -> Result<(), String> {
+    // Must be an object
+    let obj = config.as_object().ok_or("Config must be a JSON object")?;
+
+    // Validate export settings if present
+    if let Some(export) = obj.get("export") {
+        if let Some(image) = export.get("image") {
+            if let Some(quality) = image.get("quality") {
+                let q = quality.as_u64().unwrap_or(0);
+                if q == 0 || q > 100 {
+                    return Err(format!("export.image.quality must be 1-100, got {q}"));
+                }
+            }
+            if let Some(format) = image.get("format") {
+                let f = format.as_str().unwrap_or("");
+                if !["jpg", "png"].contains(&f) {
+                    return Err(format!("export.image.format must be 'jpg' or 'png', got '{f}'"));
+                }
+            }
+        }
+        if let Some(video) = export.get("video") {
+            if let Some(fps) = video.get("fps") {
+                let f = fps.as_u64().unwrap_or(0);
+                if f == 0 || f > MAX_FPS as u64 {
+                    return Err(format!("export.video.fps must be 1-{MAX_FPS}, got {f}"));
+                }
+            }
+            if let Some(bitrate) = video.get("bitrate") {
+                let b = bitrate.as_u64().unwrap_or(0);
+                if b == 0 || b > MAX_BITRATE {
+                    return Err(format!("export.video.bitrate must be 1-{MAX_BITRATE}, got {b}"));
+                }
+            }
+        }
+    }
+
+    // Validate templates if present
+    if let Some(templates) = obj.get("templates") {
+        if let Some(tpl_obj) = templates.as_object() {
+            for (group, items) in tpl_obj {
+                if let Some(arr) = items.as_array() {
+                    for item in arr {
+                        if let Some(w) = item.get("width") {
+                            let wv = w.as_u64().unwrap_or(0) as u32;
+                            if wv == 0 || wv > MAX_EXPORT_WIDTH {
+                                return Err(format!(
+                                    "Template '{group}' has invalid width {wv} (max {MAX_EXPORT_WIDTH})"
+                                ));
+                            }
+                        }
+                        if let Some(h) = item.get("height") {
+                            let hv = h.as_u64().unwrap_or(0) as u32;
+                            if hv == 0 || hv > MAX_EXPORT_HEIGHT {
+                                return Err(format!(
+                                    "Template '{group}' has invalid height {hv} (max {MAX_EXPORT_HEIGHT})"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +365,8 @@ fn read_config(app: AppHandle) -> Result<serde_json::Value, String> {
 
 #[tauri::command]
 fn save_config(app: AppHandle, config: serde_json::Value) -> Result<(), String> {
+    // Validate config structure and value ranges before persisting
+    validate_config(&config)?;
     let path = ensure_config(&app)?;
     let pretty = serde_json::to_string_pretty(&config).map_err(|e| e.to_string())?;
     fs::write(&path, pretty).map_err(|e| e.to_string())
@@ -297,6 +496,11 @@ async fn encode_video(
     bitrate: u64,
     render_audio: bool,
 ) -> Result<String, String> {
+    // Validate render parameters
+    validate_render_params(1920, 1080, fps, bitrate, &format)?;
+    // Validate source media file magic bytes
+    validate_media_file(&source_path)?;
+
     let temp_dir = {
         let sessions = state.sessions.lock().unwrap();
         sessions
@@ -370,21 +574,42 @@ async fn encode_video(
 
     args.extend(["-shortest".into(), output_path.clone()]);
 
-    let output = app
+    let (mut rx, child) = app
         .shell()
         .sidecar("ffmpeg")
         .map_err(|e| format!("FFmpeg sidecar not found: {e}"))?
         .args(&args)
-        .output()
-        .await
+        .spawn()
         .map_err(|e| format!("FFmpeg execution failed: {e}"))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "FFmpeg encode failed (exit {:?}):\n{}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    // Store child handle so cancel_render can kill it
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.active_ffmpeg.lock().unwrap();
+        *guard = Some(child);
+    }
+
+    let mut stderr_buf = Vec::new();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stderr(line) => stderr_buf.extend_from_slice(&line),
+            CommandEvent::Terminated(payload) => {
+                let state = app.state::<AppState>();
+                let mut guard = state.active_ffmpeg.lock().unwrap();
+                *guard = None;
+
+                if payload.code != Some(0) {
+                    return Err(format!(
+                        "FFmpeg encode failed (exit {:?}):\n{}",
+                        payload.code,
+                        String::from_utf8_lossy(&stderr_buf)
+                    ));
+                }
+                break;
+            }
+            _ => {}
+        }
     }
 
     Ok(output_path)
@@ -409,6 +634,22 @@ async fn encode_video_direct(
     bitrate: u64,
     render_audio: bool,
 ) -> Result<String, String> {
+    // Validate render parameters
+    validate_render_params(width, height, fps, bitrate, &format)?;
+    // Validate resize mode
+    if !ALLOWED_RESIZE_MODES.contains(&resize_mode.as_str()) {
+        return Err(format!("Invalid resize mode: '{}'. Allowed: {:?}", resize_mode, ALLOWED_RESIZE_MODES));
+    }
+    // Validate scale and offset ranges
+    if scale <= 0.0 || scale > 10.0 {
+        return Err(format!("Scale must be between 0 and 10, got {scale}"));
+    }
+    if offset_x < -5.0 || offset_x > 5.0 || offset_y < -5.0 || offset_y > 5.0 {
+        return Err(format!("Offset values must be between -5 and 5, got ({offset_x}, {offset_y})"));
+    }
+    // Validate source media file magic bytes
+    validate_media_file(&source_path)?;
+
     let w = width;
     let h = height;
 
@@ -535,21 +776,44 @@ async fn encode_video_direct(
 
     args.extend(["-r".into(), fps.to_string(), output_path.clone()]);
 
-    let output = app
+    let (mut rx, child) = app
         .shell()
         .sidecar("ffmpeg")
         .map_err(|e| format!("FFmpeg sidecar not found: {e}"))?
         .args(&args)
-        .output()
-        .await
+        .spawn()
         .map_err(|e| format!("FFmpeg execution failed: {e}"))?;
 
-    if !output.status.success() {
-        return Err(format!(
-            "FFmpeg direct encode failed (exit {:?}):\n{}",
-            output.status.code(),
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    // Store child handle so cancel_render can kill it
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.active_ffmpeg.lock().unwrap();
+        *guard = Some(child);
+    }
+
+    // Collect stderr for error reporting
+    let mut stderr_buf = Vec::new();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stderr(line) => stderr_buf.extend_from_slice(&line),
+            CommandEvent::Terminated(payload) => {
+                // Clear the stored handle
+                let state = app.state::<AppState>();
+                let mut guard = state.active_ffmpeg.lock().unwrap();
+                *guard = None;
+
+                if payload.code != Some(0) {
+                    return Err(format!(
+                        "FFmpeg direct encode failed (exit {:?}):\n{}",
+                        payload.code,
+                        String::from_utf8_lossy(&stderr_buf)
+                    ));
+                }
+                break;
+            }
+            _ => {}
+        }
     }
 
     Ok(output_path)
@@ -561,6 +825,14 @@ async fn concat_videos(
     input_paths: Vec<String>,
     output_path: String,
 ) -> Result<String, String> {
+    // Validate all input files exist and are valid media
+    if input_paths.is_empty() {
+        return Err("No input paths provided for concatenation".to_string());
+    }
+    for p in &input_paths {
+        validate_media_file(p)?;
+    }
+
     let list_path =
         std::env::temp_dir().join(format!("concat_{}.txt", &uuid::Uuid::new_v4().to_string()[..8]));
 
@@ -571,7 +843,7 @@ async fn concat_videos(
         .join("\n");
     fs::write(&list_path, &content).map_err(|e| e.to_string())?;
 
-    let output = app
+    let (mut rx, child) = app
         .shell()
         .sidecar("ffmpeg")
         .map_err(|e| format!("FFmpeg sidecar not found: {e}"))?
@@ -587,21 +859,42 @@ async fn concat_videos(
             "copy",
             &output_path,
         ])
-        .output()
-        .await
+        .spawn()
         .map_err(|e| format!("FFmpeg concat failed: {e}"))?;
 
-    // Clean up the concat list and intermediate files
-    let _ = fs::remove_file(&list_path);
-    for p in &input_paths {
-        let _ = fs::remove_file(p);
+    // Store child handle so cancel_render can kill it
+    {
+        let state = app.state::<AppState>();
+        let mut guard = state.active_ffmpeg.lock().unwrap();
+        *guard = Some(child);
     }
 
-    if !output.status.success() {
-        return Err(format!(
-            "FFmpeg concat failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
+    let mut stderr_buf = Vec::new();
+
+    while let Some(event) = rx.recv().await {
+        match event {
+            CommandEvent::Stderr(line) => stderr_buf.extend_from_slice(&line),
+            CommandEvent::Terminated(payload) => {
+                let state = app.state::<AppState>();
+                let mut guard = state.active_ffmpeg.lock().unwrap();
+                *guard = None;
+
+                // Clean up the concat list and intermediate files
+                let _ = fs::remove_file(&list_path);
+                for p in &input_paths {
+                    let _ = fs::remove_file(p);
+                }
+
+                if payload.code != Some(0) {
+                    return Err(format!(
+                        "FFmpeg concat failed:\n{}",
+                        String::from_utf8_lossy(&stderr_buf)
+                    ));
+                }
+                break;
+            }
+            _ => {}
+        }
     }
 
     Ok(output_path)
@@ -615,6 +908,16 @@ fn cleanup_session(state: State<'_, AppState>, session_id: String) -> Result<(),
     Ok(())
 }
 
+#[tauri::command]
+fn cancel_render(state: State<'_, AppState>) -> Result<(), String> {
+    let mut guard = state.active_ffmpeg.lock().unwrap();
+    if let Some(child) = guard.take() {
+        let _ = child.kill();
+        eprintln!("[BatchStudio] FFmpeg process killed by cancel_render");
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // App bootstrap
 // ---------------------------------------------------------------------------
@@ -624,7 +927,10 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(AppState::default())
+        .manage(AppState {
+            sessions: Mutex::new(HashMap::new()),
+            active_ffmpeg: Mutex::new(None),
+        })
         .invoke_handler(tauri::generate_handler![
             read_config,
             save_config,
@@ -638,6 +944,7 @@ pub fn run() {
             encode_video_direct,
             concat_videos,
             cleanup_session,
+            cancel_render,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Batch Studio");

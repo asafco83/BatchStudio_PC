@@ -69,4 +69,12 @@ const saveConfigPlugin = {
 export default defineConfig({
   base: './',
   plugins: [react(), saveConfigPlugin],
+  server: {
+    host: 'localhost',
+    strictPort: true,
+  },
+  test: {
+    globals: false,
+    environment: 'node',
+  },
 });

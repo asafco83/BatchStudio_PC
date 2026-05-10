@@ -3,7 +3,8 @@ import {
   Upload, Play, Pause, Monitor, Maximize, GripHorizontal, CheckCircle2,
   XCircle, Trash2, Plus, Type, Italic, FileVideo, Download, X, Settings, Settings2,
   Image as ImageIcon, Move, Info, AlertCircle, AlignLeft, AlignCenter,
-  AlignRight, AlignJustify, Eye, EyeOff, Link2, GripVertical, ChevronUp, ChevronDown, Volume2, VolumeX
+  AlignRight, AlignJustify, Eye, EyeOff, Link2, GripVertical, ChevronUp, ChevronDown, Volume2, VolumeX,
+  Undo2, Redo2
 } from 'lucide-react';
 import * as Bridge from './tauri-bridge';
 
@@ -63,6 +64,76 @@ function useConfig() {
   return { config, loading, error, saveConfig };
 }
 
+// --- Confirm Dialog Component ---
+function ConfirmDialog({ title, message, hint, confirmLabel = 'Confirm', cancelLabel = 'Cancel', onConfirm, onCancel, variant = 'danger' }) {
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') onCancel(); if (e.key === 'Enter') onConfirm(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onConfirm, onCancel]);
+
+  return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={onCancel}>
+      <div className="bg-ink-900 border border-white/[0.1] rounded-xl shadow-raised p-6 w-[340px] max-w-[90vw] space-y-4 text-center" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-center gap-3">
+          <div className={`w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${variant === 'danger' ? 'bg-red-500/15' : 'bg-accent-bg'}`}>
+            <AlertCircle size={18} className={variant === 'danger' ? 'text-red-400' : 'text-accent-soft'} />
+          </div>
+          <h3 className="text-sm font-semibold text-ink-50">{title}</h3>
+        </div>
+        <div className="space-y-1">
+          <p className="text-[13px] text-ink-300 leading-relaxed">{message}</p>
+          {hint && <p className="text-[11px] text-ink-500">{hint}</p>}
+        </div>
+        <div className="flex items-center justify-center gap-2 pt-1">
+          <button
+            onClick={onCancel}
+            className="h-8 px-4 rounded-lg text-xs font-medium text-ink-300 hover:text-ink-50 bg-ink-800 hover:bg-ink-700 border border-white/[0.08] transition-colors"
+          >{cancelLabel}</button>
+          <button
+            onClick={onConfirm}
+            autoFocus
+            className={`h-8 px-4 rounded-lg text-xs font-medium text-white transition-colors ${variant === 'danger' ? 'bg-red-600 hover:bg-red-500' : 'bg-accent hover:bg-accent-soft'}`}
+          >{confirmLabel}</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// --- Undo/Redo History (useReducer-based, explicit commits) ---
+function undoReducer(state, action) {
+  switch (action.type) {
+    case 'INIT':
+      return { past: [], present: action.data, future: [] };
+    case 'COMMIT':
+      // Push current present onto past, set new present, clear future
+      if (!state.present) return state;
+      const newPast = [...state.past, state.present];
+      if (newPast.length > (action.maxSteps || 50)) newPast.shift();
+      return { past: newPast, present: action.data || state.present, future: [] };
+    case 'SET':
+      // Update present silently (no history entry) — used during drags/typing
+      return { ...state, present: action.data };
+    case 'UNDO':
+      if (state.past.length === 0) return state;
+      return {
+        past: state.past.slice(0, -1),
+        present: state.past[state.past.length - 1],
+        future: [state.present, ...state.future]
+      };
+    case 'REDO':
+      if (state.future.length === 0) return state;
+      return {
+        past: [...state.past, state.present],
+        present: state.future[0],
+        future: state.future.slice(1)
+      };
+    default:
+      return state;
+  }
+}
+
 // --- Constants & Data Models ---
 
 const RESIZE_MODES = [
@@ -73,6 +144,11 @@ const RESIZE_MODES = [
 ];
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
+
+// Maximum export resolution cap (8K) to prevent memory exhaustion
+const MAX_EXPORT_WIDTH = 7680;
+const MAX_EXPORT_HEIGHT = 4320;
+const clampDimension = (val, max) => Math.max(1, Math.min(Math.round(val) || 1, max));
 
 // Reusable Color Input Component with Integrated Alpha Slider
 const ColorInput = ({ label, value, onChange }) => {
@@ -228,6 +304,7 @@ const getAlignStyles = (align) => {
 // --- Canvas-based overlay rendering (shared by video and image exports) ---
 const preloadIcons = (icons) => Promise.all(icons.map(icon => new Promise((resolveIcon) => {
   const img = new Image();
+  img.crossOrigin = 'anonymous';
   img.onload = () => resolveIcon({ ...icon, imgElement: img });
   img.onerror = () => {
     console.warn(`Failed to load icon for export: ${icon.url}`);
@@ -438,9 +515,13 @@ const encodeStaticImage = async (imageData, template, mode, texts, icons, manual
   const mime = format === 'png' ? 'image/png' : 'image/jpeg';
   const quality = Math.max(0, Math.min(1, (imageExport?.quality ?? 90) / 100));
 
+  // Enforce maximum export dimensions to prevent memory exhaustion
+  const canvasWidth = clampDimension(template.width, MAX_EXPORT_WIDTH);
+  const canvasHeight = clampDimension(template.height, MAX_EXPORT_HEIGHT);
+
   const canvas = document.createElement('canvas');
-  canvas.width = template.width;
-  canvas.height = template.height;
+  canvas.width = canvasWidth;
+  canvas.height = canvasHeight;
   const ctx = canvas.getContext('2d');
 
   if (format !== 'png') {
@@ -470,6 +551,17 @@ export default function WYSIWYGVideoEditor() {
   const assetUrls = useAssetUrls();
 
   const SOCIAL_TEMPLATES = useMemo(() => config ? config.templates : {}, [config]);
+  const TEMPLATE_ORDER = useMemo(() => {
+    if (!config) return [];
+    // Use explicit order from config, falling back to object keys
+    if (config.templateOrder && Array.isArray(config.templateOrder)) {
+      // Include any groups that exist in templates but aren't in the order array
+      const ordered = config.templateOrder.filter(g => config.templates[g]);
+      const remaining = Object.keys(config.templates).filter(g => !ordered.includes(g));
+      return [...ordered, ...remaining];
+    }
+    return Object.keys(config.templates);
+  }, [config]);
   const COMPLIANCE_ICONS = useMemo(() => config ? config.complianceIcons.map(i => i.filename) : [], [config]);
   const resolveIconUrl = React.useCallback(
     (filename) => assetUrls.resolve('compliance', filename),
@@ -489,6 +581,7 @@ export default function WYSIWYGVideoEditor() {
   const [selectedTemplateId, setSelectedTemplateId] = useState('ig-stories');
   const [customSize, setCustomSize] = useState({ width: 1080, height: 1080 });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialTab, setSettingsInitialTab] = useState('icons');
   const [leftTab, setLeftTab] = useState('layout');
 
   // Overlays
@@ -507,6 +600,159 @@ export default function WYSIWYGVideoEditor() {
   // Render State
   const [renderState, setRenderState] = useState({ isRendering: false, isComplete: false, stats: null });
   const cancelRef = useRef(false);
+  const [confirmClearQueue, setConfirmClearQueue] = useState(false);
+
+  // --- Undo/Redo (Explicit Snapshot Commits) ---
+  const undoMaxSteps = config?.undoSteps || 10;
+  const getSnapshot = React.useCallback(() => ({
+    textOverlays, iconOverlays, resizeMode, selectedTemplateId, selectedTemplateGroup, customSize, manualTransform
+  }), [textOverlays, iconOverlays, resizeMode, selectedTemplateId, selectedTemplateGroup, customSize, manualTransform]);
+
+  const [undoState, undoDispatch] = React.useReducer(undoReducer, { past: [], present: null, future: [] });
+  const undoInitialized = useRef(false);
+  const isApplyingUndo = useRef(false);
+  const textCoalesceTimer = useRef(null);
+  const textSessionActive = useRef(false); // true while user is typing
+
+  // Initialize present on first render
+  useEffect(() => {
+    if (!undoInitialized.current && config) {
+      undoDispatch({ type: 'INIT', data: getSnapshot() });
+      undoInitialized.current = true;
+    }
+  }, [config]);
+
+  // Keep present in sync during silent updates (drags, typing)
+  // This runs on every state change but only does a silent SET when appropriate
+  const lastSyncedSnapshot = useRef(null);
+  useEffect(() => {
+    if (!undoInitialized.current || isApplyingUndo.current) return;
+    const snap = getSnapshot();
+    if (JSON.stringify(snap) !== JSON.stringify(lastSyncedSnapshot.current)) {
+      lastSyncedSnapshot.current = snap;
+      undoDispatch({ type: 'SET', data: snap });
+    }
+  }, [textOverlays, iconOverlays, resizeMode, selectedTemplateId, selectedTemplateGroup, customSize, manualTransform]);
+
+  // Apply a snapshot from undo/redo to the actual state
+  const applySnapshot = React.useCallback((snapshot) => {
+    if (!snapshot) return;
+    isApplyingUndo.current = true;
+    setTextOverlays(snapshot.textOverlays);
+    setIconOverlays(snapshot.iconOverlays);
+    setResizeMode(snapshot.resizeMode);
+    setSelectedTemplateId(snapshot.selectedTemplateId);
+    setSelectedTemplateGroup(snapshot.selectedTemplateGroup);
+    setCustomSize(snapshot.customSize);
+    setManualTransform(snapshot.manualTransform);
+    lastSyncedSnapshot.current = snapshot;
+    // Reset flag after React processes the state updates
+    setTimeout(() => { isApplyingUndo.current = false; }, 0);
+  }, []);
+
+  // --- Commit helpers (called by action sites) ---
+
+  // Commit current state before making a change. Call this BEFORE applying the change.
+  const commitUndo = React.useCallback(() => {
+    clearTimeout(textCoalesceTimer.current);
+    textSessionActive.current = false;
+    const snap = getSnapshot();
+    undoDispatch({ type: 'COMMIT', data: snap, maxSteps: undoMaxSteps });
+  }, [getSnapshot, undoMaxSteps]);
+
+  // Called when a drag/resize starts — saves pre-drag state
+  const onOverlayDragStart = React.useCallback(() => {
+    // Flush any pending text session
+    if (textSessionActive.current) {
+      clearTimeout(textCoalesceTimer.current);
+      textSessionActive.current = false;
+      undoDispatch({ type: 'COMMIT', data: getSnapshot(), maxSteps: undoMaxSteps });
+    }
+    // Commit the current state so we can undo back to it
+    undoDispatch({ type: 'COMMIT', data: getSnapshot(), maxSteps: undoMaxSteps });
+  }, [getSnapshot, undoMaxSteps]);
+
+  // Called when a drag/resize ends — no action needed, state is already tracked via SET
+  const onOverlayDragEnd = React.useCallback(() => {
+    // The present was being updated via SET during drag.
+    // Nothing to do — the pre-drag state is already in past from onOverlayDragStart.
+  }, []);
+
+  // Called when text content changes (typing). Implements coalescing:
+  // - First keystroke: commits pre-typing state, starts coalesce session
+  // - Subsequent keystrokes within 1.5s: extend session (no new commits)
+  // - After 1.5s idle: session ends, next keystroke starts new session
+  const onTextChange = React.useCallback(() => {
+    if (isApplyingUndo.current) return;
+    clearTimeout(textCoalesceTimer.current);
+    if (!textSessionActive.current) {
+      // First keystroke — commit the state before typing started
+      textSessionActive.current = true;
+      // The commit was already done by the SET sync, we just need to mark boundary
+      undoDispatch({ type: 'COMMIT', data: lastSyncedSnapshot.current || getSnapshot(), maxSteps: undoMaxSteps });
+    }
+    // Reset idle timer — if user stops typing for 1.5s, end the session
+    textCoalesceTimer.current = setTimeout(() => {
+      textSessionActive.current = false;
+    }, 1500);
+  }, [getSnapshot, undoMaxSteps]);
+
+  // Commit before discrete (non-drag, non-text) changes
+  const commitBeforeChange = React.useCallback(() => {
+    if (isApplyingUndo.current) return;
+    // Flush any pending text session
+    if (textSessionActive.current) {
+      clearTimeout(textCoalesceTimer.current);
+      textSessionActive.current = false;
+    }
+    undoDispatch({ type: 'COMMIT', data: getSnapshot(), maxSteps: undoMaxSteps });
+  }, [getSnapshot, undoMaxSteps]);
+
+  // --- Undo/Redo actions ---
+  const handleUndo = React.useCallback(() => {
+    // Flush any pending text session
+    if (textSessionActive.current) {
+      clearTimeout(textCoalesceTimer.current);
+      textSessionActive.current = false;
+    }
+    undoDispatch({ type: 'UNDO' });
+    // Apply will happen via useEffect watching undoState.present
+  }, []);
+
+  const handleRedo = React.useCallback(() => {
+    if (textSessionActive.current) {
+      clearTimeout(textCoalesceTimer.current);
+      textSessionActive.current = false;
+    }
+    undoDispatch({ type: 'REDO' });
+  }, []);
+
+  // When undo/redo changes present, apply it to actual state
+  const lastAppliedPresent = useRef(null);
+  useEffect(() => {
+    if (!undoState.present || !undoInitialized.current) return;
+    // Only apply if this is a genuine undo/redo (not our own SET)
+    if (undoState.present === lastAppliedPresent.current) return;
+    if (JSON.stringify(undoState.present) === JSON.stringify(getSnapshot())) {
+      lastAppliedPresent.current = undoState.present;
+      return;
+    }
+    lastAppliedPresent.current = undoState.present;
+    applySnapshot(undoState.present);
+  }, [undoState.present]);
+
+  const canUndo = undoState.past.length > 0;
+  const canRedo = undoState.future.length > 0;
+
+  // Keyboard shortcuts: Ctrl+Z / Ctrl+Y
+  useEffect(() => {
+    const handler = (e) => {
+      if ((e.ctrlKey || e.metaKey) && e.key === 'z' && !e.shiftKey) { e.preventDefault(); handleUndo(); }
+      if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || (e.key === 'z' && e.shiftKey))) { e.preventDefault(); handleRedo(); }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [handleUndo, handleRedo]);
 
   // Derived state
   const selectedTemplate = useMemo(() => {
@@ -522,12 +768,84 @@ export default function WYSIWYGVideoEditor() {
   const activeText = useMemo(() => textOverlays.find(t => t.id === selectedTextId) || null, [textOverlays, selectedTextId]);
   const activeIcon = useMemo(() => iconOverlays.find(i => i.id === selectedIconId) || null, [iconOverlays, selectedIconId]);
 
+  // Keyboard shortcuts: Arrow keys to nudge selected overlay
+  const nudgeRef = useRef({ committed: false });
+  useEffect(() => {
+    const handler = (e) => {
+      // Skip if focus is on an input/textarea (user is typing)
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      const arrows = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+      if (!arrows.includes(e.key)) return;
+      if (!selectedIconId && !selectedTextId) return;
+
+      e.preventDefault();
+
+      const pxAmount = e.shiftKey ? 10 : 1;
+      let dx = 0, dy = 0;
+      if (e.key === 'ArrowLeft') dx = -pxAmount;
+      if (e.key === 'ArrowRight') dx = pxAmount;
+      if (e.key === 'ArrowUp') dy = -pxAmount;
+      if (e.key === 'ArrowDown') dy = pxAmount;
+
+      // Commit undo state once at the start of a nudge sequence
+      if (!nudgeRef.current.committed) {
+        commitBeforeChange();
+        nudgeRef.current.committed = true;
+      }
+
+      if (selectedIconId) {
+        setIconOverlays(prev => prev.map(icon => {
+          if (icon.id !== selectedIconId) return icon;
+          const dxPct = (dx / selectedTemplate.width) * 100;
+          const dyPct = (dy / selectedTemplate.height) * 100;
+          const newX = Math.max(0, Math.min(icon.x + dxPct, 100 - icon.width));
+          const newY = Math.max(0, Math.min(icon.y + dyPct, 100));
+          return { ...icon, x: newX, y: newY };
+        }));
+      }
+
+      if (selectedTextId) {
+        setTextOverlays(prev => prev.map(text => {
+          if (text.id !== selectedTextId) return text;
+          const dxPct = (dx / selectedTemplate.width) * 100;
+          const dyPct = (dy / selectedTemplate.height) * 100;
+          const newX = Math.max(0, Math.min(text.x + dxPct, 100 - text.width));
+          const newY = Math.max(0, Math.min(text.y + dyPct, 100 - text.height));
+          return { ...text, x: newX, y: newY };
+        }));
+      }
+    };
+
+    const handleKeyUp = (e) => {
+      const arrows = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+      if (arrows.includes(e.key)) {
+        nudgeRef.current.committed = false;
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handler);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, [selectedIconId, selectedTextId, selectedTemplate, commitBeforeChange]);
+
   // --- Tauri-Specific File Handling ---
   const processTauriPaths = React.useCallback(async (paths) => {
     console.log('[App] Starting ingestion for:', paths);
     const newItems = [];
     
     for (const filePath of paths) {
+      // Skip duplicates — check if this file path is already in the queue
+      const isDuplicate = videos.some(v => v.filePath === filePath);
+      if (isDuplicate) {
+        console.log(`[App] Skipping duplicate: ${filePath}`);
+        continue;
+      }
+
       try {
         const name = Bridge.getFileName(filePath);
         const type = Bridge.getMediaType(filePath);
@@ -582,7 +900,7 @@ export default function WYSIWYGVideoEditor() {
     if (!selectedVideoId && newItems.length > 0) {
       setSelectedVideoId(newItems[0].id);
     }
-  }, [selectedVideoId]);
+  }, [selectedVideoId, videos]);
 
   const handleTauriFileSelect = async () => {
     const paths = await Bridge.pickMediaFiles();
@@ -598,6 +916,9 @@ export default function WYSIWYGVideoEditor() {
   };
 
   // Tauri drag-and-drop listener
+  const processTauriPathsRef = useRef(processTauriPaths);
+  useEffect(() => { processTauriPathsRef.current = processTauriPaths; }, [processTauriPaths]);
+
   useEffect(() => {
     if (!Bridge.isTauri || dragDropRegistered.current) return;
     dragDropRegistered.current = true;
@@ -614,11 +935,11 @@ export default function WYSIWYGVideoEditor() {
         console.log(`  > ${p} (${ext}): ${ok ? 'KEEP' : 'SKIP'}`);
         return ok;
       });
-      if (filtered.length > 0) processTauriPaths(filtered);
+      if (filtered.length > 0) processTauriPathsRef.current(filtered);
     }).then(fn => { unlisten = fn; });
     
     return () => { if (unlisten) unlisten(); };
-  }, [processTauriPaths]);
+  }, []);
 
   if (loading) {
     return (
@@ -645,7 +966,10 @@ export default function WYSIWYGVideoEditor() {
   };
 
   const processNewFiles = async (files) => {
-    const newItems = await Promise.all(files.map(file => new Promise((resolve) => {
+    // Filter out duplicates by name + size
+    const dedupedFiles = files.filter(file => !videos.some(v => v.name === file.name && v.file?.size === file.size));
+    if (!dedupedFiles.length) return;
+    const newItems = await Promise.all(dedupedFiles.map(file => new Promise((resolve) => {
       const url = URL.createObjectURL(file);
       const isImage = file.type.startsWith('image/');
 
@@ -723,6 +1047,7 @@ export default function WYSIWYGVideoEditor() {
 
   // --- Overlay Handling ---
   const addTextOverlay = () => {
+    commitBeforeChange();
     const newText = {
       id: generateId(),
       text: 'New Text',
@@ -746,17 +1071,30 @@ export default function WYSIWYGVideoEditor() {
   };
 
   const updateTextOverlay = (id, updates) => {
+    // Check if this is a text content change (typing) vs style/position
+    const isTextContent = 'text' in updates && Object.keys(updates).length === 1;
+    const isPositionOnly = Object.keys(updates).every(k => ['x', 'y', 'width', 'height'].includes(k));
+    if (isTextContent) {
+      onTextChange();
+    } else if (!isPositionOnly && !isApplyingUndo.current) {
+      // Style or property change — commit before applying
+      commitBeforeChange();
+    }
     setTextOverlays(prev => prev.map(t => t.id === id ? { ...t, ...updates } : t));
   };
 
   const addIconOverlay = () => {
+    commitBeforeChange();
     const firstCfg = config?.complianceIcons?.[0];
     const firstName = COMPLIANCE_ICONS[0];
+    const defaultWidth = 15;
+    const x = (100 - defaultWidth) / 2;  // 42.5
+    const y = (100 - defaultWidth) / 2;  // 42.5
     const newIcon = {
       id: generateId(),
       filename: firstName,
       url: resolveIconUrl(firstName),
-      x: 10, y: 10, width: 15,
+      x, y, width: defaultWidth,
       opacity: 100,
       minWidth: firstCfg?.minWidth ?? null
     };
@@ -766,6 +1104,12 @@ export default function WYSIWYGVideoEditor() {
   };
 
   const updateIconOverlay = (id, updates) => {
+    // Position updates during drag are handled by onOverlayDragStart/End
+    // Style changes (opacity, filename) commit immediately
+    const isPositionOnly = Object.keys(updates).every(k => ['x', 'y', 'width'].includes(k));
+    if (!isPositionOnly && !isApplyingUndo.current) {
+      commitBeforeChange();
+    }
     setIconOverlays(prev => prev.map(i => i.id === id ? { ...i, ...updates } : i));
   };
 
@@ -801,6 +1145,9 @@ export default function WYSIWYGVideoEditor() {
 
       onProgress(10);
 
+      // Check cancel before starting the heavy FFmpeg encode
+      if (cancelRef.current) { await Bridge.cleanupSession(session_id).catch(() => {}); throw new Error('Cancelled by user'); }
+
       // Step 2: Encode main video using FFmpeg-native pipeline
       const nameParts = videoData.name.split('.'); nameParts.pop();
       const baseName = nameParts.join('.') || 'output';
@@ -822,6 +1169,9 @@ export default function WYSIWYGVideoEditor() {
         fps, format, bitrate, renderAudio,
       });
 
+      // Check cancel after main encode completes
+      if (cancelRef.current) { await Bridge.cleanupSession(session_id).catch(() => {}); throw new Error('Cancelled by user'); }
+
       onProgress(outroData ? 70 : 95);
 
       // Step 3: Handle outro if present (no manual transform, just fit/blur)
@@ -841,6 +1191,9 @@ export default function WYSIWYGVideoEditor() {
           useBlur: mode === 'blur' || (mode === 'manual' && manualXform?.blur !== false),
           fps, format, bitrate, renderAudio,
         });
+
+        // Check cancel after outro encode
+        if (cancelRef.current) { await Bridge.cleanupSession(session_id).catch(() => {}); throw new Error('Cancelled by user'); }
 
         onProgress(90);
         await Bridge.concatVideos([mainOutputPath, outroOutputPath], videoData.outputPath);
@@ -889,6 +1242,7 @@ export default function WYSIWYGVideoEditor() {
 
         if (vid.type === 'image') {
           const result = await encodeStaticImage(vid, selectedTemplate, resizeMode, textOverlays, iconOverlays, manualTransform, config?.export?.image);
+          if (cancelRef.current) { setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'cancelled' } : x)); cancelledCount++; continue; }
           setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, progress: 100 } : x));
           const { blob, extension } = result;
           const outName = `${baseName}_processed.${extension}`;
@@ -907,23 +1261,32 @@ export default function WYSIWYGVideoEditor() {
             const vidWithOutput = { ...vid, outputPath };
 
             await encodeVideoFFmpeg(vidWithOutput, selectedTemplate, resizeMode, textOverlays, iconOverlays, outroFile, (prog) => {
+              if (cancelRef.current) return;
               setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, progress: prog } : x));
             }, manualTransform, config?.export?.video);
+            if (cancelRef.current) { setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'cancelled' } : x)); cancelledCount++; continue; }
           } else {
             const result = await encodeVideoOnCanvas(vid, selectedTemplate, resizeMode, textOverlays, iconOverlays, outroFile, (prog) => {
               setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, progress: prog } : x));
             }, manualTransform, config?.export?.video);
+            if (cancelRef.current) { setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'cancelled' } : x)); cancelledCount++; continue; }
             const { blob, extension } = result;
             Bridge.downloadBlob(blob, `${baseName}_processed.${extension}`);
           }
         }
 
+        if (cancelRef.current) { setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'cancelled' } : x)); cancelledCount++; continue; }
         setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'success', progress: 100 } : x));
         successCount++;
       } catch (err) {
-        console.error("Render failed:", err);
-        setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'failed' } : x));
-        failCount++;
+        if (cancelRef.current || (err.message && err.message.includes('Cancelled'))) {
+          setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'cancelled' } : x));
+          cancelledCount++;
+        } else {
+          console.error("Render failed:", err);
+          setVideos(prev => prev.map(x => x.id === vid.id ? { ...x, status: 'failed' } : x));
+          failCount++;
+        }
       }
     }
 
@@ -934,7 +1297,13 @@ export default function WYSIWYGVideoEditor() {
     });
   };
 
-  const cancelRender = () => cancelRef.current = true;
+  const cancelRender = () => {
+    cancelRef.current = true;
+    // Immediately mark all queued items as cancelled for responsive UI
+    setVideos(prev => prev.map(v => v.status === 'queued' ? { ...v, status: 'cancelled' } : v));
+    // Kill the active FFmpeg process on the Rust side
+    Bridge.cancelRender().catch(() => {});
+  };
 
   const encodeVideoOnCanvas = async (videoData, template, mode, texts, icons, outroFile, onProgress, manualXform, videoExport) => {
     const loadedIcons = await preloadIcons(icons);
@@ -1185,10 +1554,11 @@ export default function WYSIWYGVideoEditor() {
             
             <div className="space-y-2">
               <div className="flex flex-wrap gap-1 p-1 bg-ink-850 rounded-lg border border-white/[0.04]">
-                {Object.keys(SOCIAL_TEMPLATES).map(p => (
+                {TEMPLATE_ORDER.map(p => (
                   <button
                     key={p}
                     onClick={() => {
+                      commitBeforeChange();
                       setSelectedTemplateGroup(p);
                       setSelectedTemplateId(SOCIAL_TEMPLATES[p][0].id);
                     }}
@@ -1203,7 +1573,7 @@ export default function WYSIWYGVideoEditor() {
                 {SOCIAL_TEMPLATES[selectedTemplateGroup]?.filter(t => t.id !== 'custom-id').map(t => (
                   <button
                     key={t.id}
-                    onClick={() => setSelectedTemplateId(t.id)}
+                    onClick={() => { commitBeforeChange(); setSelectedTemplateId(t.id); }}
                     className={`w-full flex items-center gap-3 p-2 rounded-md border transition-all text-left ${selectedTemplateId === t.id ? 'bg-accent-bg border-accent-ring' : 'bg-transparent border-white/[0.04] hover:bg-white/[0.03] hover:border-white/[0.08]'}`}
                   >
                     <div className="relative shrink-0 flex items-center justify-center p-1 w-8 h-8 rounded bg-ink-900 border border-white/[0.08]">
@@ -1222,11 +1592,11 @@ export default function WYSIWYGVideoEditor() {
                 <div className="grid grid-cols-2 gap-2 mt-2">
                   <div>
                     <label className="text-xs text-ink-500 mb-1 block">Width</label>
-                    <NumberInput value={customSize.width} onChange={val => setCustomSize(p => ({...p, width: val}))} containerClassName="h-8" />
+                    <NumberInput value={customSize.width} onChange={val => setCustomSize(p => ({...p, width: clampDimension(val, MAX_EXPORT_WIDTH)}))} min={1} max={MAX_EXPORT_WIDTH} containerClassName="h-8" />
                   </div>
                   <div>
                     <label className="text-xs text-ink-500 mb-1 block">Height</label>
-                    <NumberInput value={customSize.height} onChange={val => setCustomSize(p => ({...p, height: val}))} containerClassName="h-8" />
+                    <NumberInput value={customSize.height} onChange={val => setCustomSize(p => ({...p, height: clampDimension(val, MAX_EXPORT_HEIGHT)}))} min={1} max={MAX_EXPORT_HEIGHT} containerClassName="h-8" />
                   </div>
                 </div>
               )}
@@ -1243,7 +1613,7 @@ export default function WYSIWYGVideoEditor() {
                 return (
                   <button
                     key={m.id}
-                    onClick={() => setResizeMode(m.id)}
+                    onClick={() => { commitBeforeChange(); setResizeMode(m.id); }}
                     className={`group relative p-3 rounded-lg border text-left transition-all ${active ? 'bg-accent-bg border-accent-ring' : 'bg-ink-850 border-white/[0.04] hover:border-white/[0.1] hover:bg-ink-800'}`}
                   >
                     <IconC size={15} className={active ? 'text-accent-soft' : 'text-ink-300 group-hover:text-ink-100'} />
@@ -1473,6 +1843,7 @@ export default function WYSIWYGVideoEditor() {
 
                 <button
                   onClick={() => {
+                    commitBeforeChange();
                     setTextOverlays(prev => prev.filter(t => t.id !== activeText.id));
                     setSelectedTextId(null);
                   }}
@@ -1485,6 +1856,13 @@ export default function WYSIWYGVideoEditor() {
               <div className="space-y-4 bg-ink-850 p-4 rounded-lg border border-white/[0.08]">
                 <h3 className="text-sm font-semibold text-ink-100 mb-2 flex items-center justify-between">
                   <div className="flex items-center gap-2"><ImageIcon size={16} /> Icon Properties</div>
+                  <button
+                    onClick={() => { setSettingsInitialTab('icons'); setSettingsOpen(true); }}
+                    className="p-1 rounded hover:bg-white/10 text-ink-400 hover:text-ink-100 transition-colors"
+                    title="Manage compliance icons"
+                  >
+                    <Settings size={14} />
+                  </button>
                 </h3>
 
                 <div>
@@ -1545,6 +1923,7 @@ export default function WYSIWYGVideoEditor() {
 
                 <button
                   onClick={() => {
+                    commitBeforeChange();
                     setIconOverlays(prev => prev.filter(i => i.id !== activeIcon.id));
                     setSelectedIconId(null);
                   }}
@@ -1591,32 +1970,32 @@ export default function WYSIWYGVideoEditor() {
       <main className="flex-1 flex flex-col h-full min-h-0 relative bg-black/40">
 
         <div className="h-11 shrink-0 border-b border-white/[0.05] flex items-center px-4 gap-2 bg-ink-900 z-10">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 min-w-0 shrink">
             {activeVideo ? (
               <>
-                <span className="chip">
-                  {activeVideo.type === 'video' ? <FileVideo size={12} className="text-ink-500" /> : <ImageIcon size={12} className="text-ink-500" />}
-                  <span className="truncate max-w-[220px] text-ink-200 font-medium ml-1">{activeVideo.name}</span>
+                <span className="chip min-w-0">
+                  {activeVideo.type === 'video' ? <FileVideo size={12} className="text-ink-500 shrink-0" /> : <ImageIcon size={12} className="text-ink-500 shrink-0" />}
+                  <span className="truncate max-w-[140px] text-ink-200 font-medium ml-1">{activeVideo.name}</span>
                 </span>
-                <span className="chip font-mono">{activeVideo.width}×{activeVideo.height}</span>
-                {activeVideo.type === 'video' && <span className="chip font-mono">{Math.round(activeVideo.duration)}s</span>}
+                <span className="chip font-mono shrink-0">{activeVideo.width}×{activeVideo.height}</span>
+                {activeVideo.type === 'video' && <span className="chip font-mono shrink-0">{Math.round(activeVideo.duration)}s</span>}
               </>
             ) : (
               <span className="text-[13px] font-medium text-ink-100 ml-2">Live Preview</span>
             )}
           </div>
           <div className="flex-1" />
-          <div className="flex items-center gap-0.5 p-0.5 bg-ink-850 rounded-md border border-white/[0.05]">
-            <span className="text-[11px] text-ink-300 font-mono px-2 flex items-center gap-1.5 break-normal">
+          <div className="flex items-center gap-0.5 p-0.5 bg-ink-850 rounded-md border border-white/[0.05] shrink-0">
+            <span className="text-[11px] text-ink-300 font-mono px-2 flex items-center gap-1.5 whitespace-nowrap">
               <span className="text-ink-500 font-sans">{selectedTemplateGroup}:</span>
               <span>{selectedTemplate.name || 'Custom'}, <span className="text-ink-400">{selectedTemplate.width} × {selectedTemplate.height}</span>{selectedTemplate.ratio ? `, ${selectedTemplate.ratio}` : ''}</span>
             </span>
-            {selectedTemplate.safeAreaImage && (
+            {(selectedTemplate.safeAreaImage || selectedTemplate.safeArea) && (
               <>
                 <div className="w-px h-4 bg-white/[0.06] mx-1" />
                 <button
                   onClick={() => setShowSafeZone(v => !v)}
-                  className={`h-7 px-2.5 rounded text-[11.5px] flex items-center gap-1.5 transition-colors ${showSafeZone ? 'bg-ink-700 text-ink-50' : 'text-ink-400 hover:text-ink-100'}`}
+                  className={`h-7 px-2.5 rounded text-[11.5px] flex items-center gap-1.5 transition-colors whitespace-nowrap ${showSafeZone ? 'bg-ink-700 text-ink-50' : 'text-ink-400 hover:text-ink-100'}`}
                 >
                   {showSafeZone ? <Eye size={13} /> : <EyeOff size={13} />} Safe zone
                 </button>
@@ -1626,6 +2005,26 @@ export default function WYSIWYGVideoEditor() {
         </div>
 
         <div className="flex-1 relative flex items-center justify-center overflow-hidden bg-dot-pattern min-h-0 min-w-0">
+          {/* Undo/Redo buttons */}
+          <div className="absolute top-2 left-2 z-50 flex items-center gap-0.5">
+            <button
+              onClick={handleUndo}
+              disabled={!canUndo}
+              className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors ${canUndo ? 'text-ink-300 hover:bg-white/[0.08] hover:text-ink-50' : 'text-ink-700 cursor-default'}`}
+              title="Undo (Ctrl+Z)"
+            >
+              <Undo2 size={14} />
+            </button>
+            <button
+              onClick={handleRedo}
+              disabled={!canRedo}
+              className={`w-7 h-7 rounded-md flex items-center justify-center transition-colors ${canRedo ? 'text-ink-300 hover:bg-white/[0.08] hover:text-ink-50' : 'text-ink-700 cursor-default'}`}
+              title="Redo (Ctrl+Y)"
+            >
+              <Redo2 size={14} />
+            </button>
+          </div>
+
           {!activeVideo ? (
             <div className="text-center">
               <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-ink-850 mb-4 shadow-lg border border-white/[0.08]">
@@ -1650,6 +2049,9 @@ export default function WYSIWYGVideoEditor() {
               manualTransform={manualTransform}
               onManualTransformChange={setManualTransform}
               resolveSafezoneUrl={resolveSafezoneUrl}
+              onOverlayDragStart={onOverlayDragStart}
+              onOverlayDragEnd={onOverlayDragEnd}
+              safeAreaColor={config?.safeAreaColor}
             />
           )}
         </div>
@@ -1661,10 +2063,21 @@ export default function WYSIWYGVideoEditor() {
           <h2 className="text-[12px] font-semibold text-ink-100 flex items-center gap-1.5">
             Queue <span className="text-[10.5px] font-mono text-ink-500">{videos.length}</span>
           </h2>
-          <label className="cursor-pointer h-7 px-2 rounded-md flex items-center justify-center text-ink-400 hover:text-ink-100 hover:bg-white/[0.05]" title="Add Media" onClick={(e) => { if (Bridge.isTauri) { e.preventDefault(); handleTauriFileSelect(); } }}>
-            <Plus size={14} />
-            <input type="file" multiple accept="video/*,image/*" className="hidden" onChange={handleFileUpload} />
-          </label>
+          <div className="flex items-center gap-1">
+            {videos.length > 0 && (
+              <button
+                onClick={() => setConfirmClearQueue(true)}
+                className="h-7 px-2 rounded-md flex items-center gap-1 text-[11.5px] font-medium text-ink-400 hover:text-red-400 hover:bg-red-500/[0.08] transition-colors"
+                title="Clear queue"
+              >
+                <Trash2 size={13} /> Clear
+              </button>
+            )}
+            <label className="cursor-pointer text-xs flex items-center gap-1 bg-ink-850 hover:bg-ink-700 px-2 py-1 rounded text-ink-100 transition-colors" title="Add Media" onClick={(e) => { if (Bridge.isTauri) { e.preventDefault(); handleTauriFileSelect(); } }}>
+              <Plus size={14} /> Media
+              <input type="file" multiple accept="video/*,image/*" className="hidden" onChange={handleFileUpload} />
+            </label>
+          </div>
         </div>
         <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-2">
 
@@ -1764,12 +2177,25 @@ export default function WYSIWYGVideoEditor() {
         </div>
       </aside>
       </div>
+      {confirmClearQueue && (
+        <ConfirmDialog
+          title="Clear Queue"
+          message={`Remove all ${videos.length} item${videos.length > 1 ? 's' : ''} from the queue?`}
+          hint="This cannot be undone."
+          confirmLabel="Clear All"
+          cancelLabel="Cancel"
+          variant="danger"
+          onConfirm={() => { setVideos([]); setSelectedVideoId(null); setConfirmClearQueue(false); }}
+          onCancel={() => setConfirmClearQueue(false)}
+        />
+      )}
       {settingsOpen && config && (
         <SettingsModal
           config={config}
           onSave={async (newConfig) => { await saveConfig(newConfig); setSettingsOpen(false); }}
           onClose={() => setSettingsOpen(false)}
           onAssetsChanged={assetUrls.refresh}
+          initialTab={settingsInitialTab}
         />
       )}
 
@@ -1798,15 +2224,7 @@ export default function WYSIWYGVideoEditor() {
         </div>
       )}
 
-      <style dangerouslySetInnerHTML={{__html: `
-        .bg-dot-pattern { background-image: radial-gradient(rgba(255, 255, 255, 0.05) 1px, transparent 1px); background-size: 20px 20px; }
-        .custom-scrollbar::-webkit-scrollbar { width: 6px; }
-        .custom-scrollbar::-webkit-scrollbar-track { background: transparent; }
-        .custom-scrollbar::-webkit-scrollbar-thumb { background: #334155; border-radius: 10px; }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: #475569; }
-        .bg-checkerboard { background-image: linear-gradient(45deg, #334155 25%, transparent 25%), linear-gradient(-45deg, #334155 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #334155 75%), linear-gradient(-45deg, transparent 75%, #334155 75%); background-size: 8px 8px; background-position: 0 0, 0 4px, 4px -4px, -4px 0px; }
-        .range-slider::-webkit-slider-thumb { appearance: none; width: 12px; height: 12px; background: #3b82f6; border-radius: 50%; cursor: pointer; }
-      `}} />
+
     </div>
   );
 }
@@ -1816,7 +2234,8 @@ function PreviewCanvas({
   video, template, resizeMode,
   textOverlays, selectedTextId, setSelectedTextId, updateTextOverlay,
   iconOverlays, selectedIconId, setSelectedIconId, updateIconOverlay,
-  showSafeZone, manualTransform, onManualTransformChange, resolveSafezoneUrl
+  showSafeZone, manualTransform, onManualTransformChange, resolveSafezoneUrl,
+  onOverlayDragStart, onOverlayDragEnd, safeAreaColor
 }) {
   const isImage = video.type === 'image';
   const wrapperRef = useRef(null);
@@ -1902,6 +2321,7 @@ function PreviewCanvas({
     const clickInsideCanvas = containerRef.current && containerRef.current.contains(e.target);
     if (resizeMode === 'manual' && clickInsideCanvas) {
       e.currentTarget.setPointerCapture(e.pointerId);
+      if (onOverlayDragStart) onOverlayDragStart();
       manualDragRef.current = {
         startX: e.clientX, startY: e.clientY,
         initOffsetX: manualTransform.offsetX, initOffsetY: manualTransform.offsetY
@@ -1914,17 +2334,21 @@ function PreviewCanvas({
 
   const handleCanvasPointerMove = (e) => {
     if (!manualDragRef.current || !containerRef.current) return;
+    const drag = manualDragRef.current;
     const rect = containerRef.current.getBoundingClientRect();
-    const dx = (e.clientX - manualDragRef.current.startX) / rect.width;
-    const dy = (e.clientY - manualDragRef.current.startY) / rect.height;
+    const dx = (e.clientX - drag.startX) / rect.width;
+    const dy = (e.clientY - drag.startY) / rect.height;
     onManualTransformChange(t => ({
       ...t,
-      offsetX: manualDragRef.current.initOffsetX + dx,
-      offsetY: manualDragRef.current.initOffsetY + dy
+      offsetX: drag.initOffsetX + dx,
+      offsetY: drag.initOffsetY + dy
     }));
   };
 
-  const handleCanvasPointerUp = () => { manualDragRef.current = null; };
+  const handleCanvasPointerUp = () => {
+    if (manualDragRef.current && onOverlayDragEnd) onOverlayDragEnd();
+    manualDragRef.current = null;
+  };
 
   const manualVideoStyle = (() => {
     if (resizeMode !== 'manual' || canvasSize.width === 0 || !video.width || !video.height) return null;
@@ -1961,7 +2385,7 @@ function PreviewCanvas({
     <div className="w-full h-full flex flex-col min-h-0 min-w-0 bg-transparent">
       <div
         ref={wrapperRef}
-        className={`flex-1 relative flex items-center justify-center min-h-0 min-w-0 p-4 md:p-8 ${resizeMode === 'manual' ? 'cursor-grab active:cursor-grabbing' : ''}`}
+        className={`flex-1 relative flex items-center justify-center min-h-0 min-w-0 p-4 md:p-8 select-none ${resizeMode === 'manual' ? 'cursor-grab active:cursor-grabbing' : ''}`}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={handleCanvasPointerUp}
@@ -1992,12 +2416,21 @@ function PreviewCanvas({
             isMain: true
           })}
 
+          {showSafeZone && template.safeAreaImage && (
+            <img
+              src={(resolveSafezoneUrl && resolveSafezoneUrl(template.safeAreaImage)) || `/safezones/${template.safeAreaImage}`}
+              alt="Safe zone overlay"
+              className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none z-40"
+              draggable={false}
+            />
+          )}
+
           {showSafeZone && template.safeArea && (
             <div
-              className="absolute border border-red-500/40 border-dashed pointer-events-none"
-              style={{ top: template.safeArea.top, bottom: template.safeArea.bottom, left: template.safeArea.left, right: template.safeArea.right }}
+              className="absolute border border-dashed pointer-events-none z-50"
+              style={{ top: template.safeArea.top, bottom: template.safeArea.bottom, left: template.safeArea.left, right: template.safeArea.right, borderColor: safeAreaColor || '#ef4444ff' }}
             >
-              <div className="absolute -top-6 left-0 text-[10px] text-red-500/80 bg-black/50 px-1 rounded whitespace-nowrap">Safe Area</div>
+              <div className="absolute -top-6 left-0 text-[10px] bg-black/50 px-1 rounded whitespace-nowrap" style={{ color: safeAreaColor || '#ef4444ff' }}>Safe Area</div>
             </div>
           )}
 
@@ -2011,6 +2444,8 @@ function PreviewCanvas({
                 onSelect={() => { setSelectedTextId(text.id); setSelectedIconId(null); }}
                 onUpdate={(updates) => updateTextOverlay(text.id, updates)}
                 containerRef={containerRef}
+                onDragStart={onOverlayDragStart}
+                onDragEnd={onOverlayDragEnd}
               />
             ))}
 
@@ -2023,26 +2458,21 @@ function PreviewCanvas({
                 onSelect={() => { setSelectedIconId(icon.id); setSelectedTextId(null); }}
                 onUpdate={(updates) => updateIconOverlay(icon.id, updates)}
                 containerRef={containerRef}
+                onDragStart={onOverlayDragStart}
+                onDragEnd={onOverlayDragEnd}
+                templateWidth={template.width}
+                templateHeight={template.height}
               />
             ))}
           </div>
-
-          {showSafeZone && template.safeAreaImage && (
-            <img
-              src={(resolveSafezoneUrl && resolveSafezoneUrl(template.safeAreaImage)) || `/safezones/${template.safeAreaImage}`}
-              alt="Safe zone overlay"
-              className="absolute inset-0 w-full h-full object-fill pointer-events-none select-none z-40"
-              draggable={false}
-            />
-          )}
 
         </div>
       )}
 
       </div>
 
-      {canvasSize.width > 0 && !isImage && (
-        <div className="h-12 shrink-0 flex flex-col justify-center items-center bg-black/20 border-t border-white/[0.05]">
+      {canvasSize.width > 0 && (
+        <div className={`h-12 shrink-0 flex flex-col justify-center items-center bg-black/20 border-t border-white/[0.05] ${isImage ? 'opacity-40 pointer-events-none' : ''}`}>
           <div className="flex items-center gap-1.5 pointer-events-auto">
             <button onClick={togglePlay} className="w-7 h-7 rounded-md flex items-center justify-center text-ink-300 hover:bg-white/[0.08] hover:text-ink-50 cursor-pointer transition-colors">
               {isPlaying ? <Pause size={12} /> : <Play size={12} />}
@@ -2077,7 +2507,7 @@ function PreviewCanvas({
 }
 
 // --- Draggable Icon Component ---
-function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }) {
+function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef, onDragStart, onDragEnd, templateWidth, templateHeight }) {
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const startPosRef = useRef({ x: 0, y: 0, initX: 0, initY: 0, initW: 0 });
@@ -2089,6 +2519,7 @@ function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }
     if (!containerRef.current) return;
     if (mode === 'drag') setIsDragging(true);
     if (mode === 'resize') setIsResizing(true);
+    if (onDragStart) onDragStart();
 
     startPosRef.current = {
       x: e.clientX,
@@ -2121,7 +2552,7 @@ function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }
       if (isResizing) {
         let newW = startPosRef.current.initW + dx;
 
-        const minWPercent = iconObj.minWidth ? (iconObj.minWidth / rect.width) * 100 : 0;
+        const minWPercent = iconObj.minWidth ? (iconObj.minWidth / rect.width) * 100 : 2;
 
         newW = Math.max(minWPercent, Math.min(newW, 100 - iconObj.x));
         onUpdate({ width: newW });
@@ -2131,6 +2562,7 @@ function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }
     const handlePointerUp = () => {
       setIsDragging(false);
       setIsResizing(false);
+      if (onDragEnd) onDragEnd();
     };
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -2141,6 +2573,12 @@ function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }
       window.removeEventListener('pointerup', handlePointerUp);
     };
   }, [isDragging, isResizing, iconObj, onUpdate, containerRef]);
+
+  const outputWidth = Math.round(iconObj.width / 100 * templateWidth);
+  const outputHeight = (iconObj._nw && iconObj._nh)
+    ? Math.round(outputWidth * iconObj._nh / iconObj._nw)
+    : null;
+  const dimensionLabel = outputHeight ? `${outputWidth} × ${outputHeight} px` : `${outputWidth} px wide`;
 
   return (
     <div
@@ -2158,7 +2596,8 @@ function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }
           className="absolute -top-7 left-0 right-0 h-6 bg-accent rounded-t-md text-white flex items-center justify-center cursor-move shadow-md opacity-90 hover:opacity-100 transition-opacity z-20"
           onPointerDown={(e) => handlePointerDown(e, 'drag')}
         >
-          <Move size={14} />
+          <Move size={12} className="mr-1" />
+          <span className="text-[9px] font-mono opacity-90">{dimensionLabel}</span>
         </div>
       )}
 
@@ -2184,7 +2623,7 @@ function DraggableIcon({ iconObj, isSelected, onSelect, onUpdate, containerRef }
 }
 
 // --- Draggable Resizable Text Component ---
-function DraggableText({ textObj, isSelected, onSelect, onUpdate, containerRef }) {
+function DraggableText({ textObj, isSelected, onSelect, onUpdate, containerRef, onDragStart, onDragEnd }) {
   const [isDragging, setIsDragging] = useState(false);
   const [isResizing, setIsResizing] = useState(false);
   const [isOverflowing, setIsOverflowing] = useState(false);
@@ -2218,6 +2657,7 @@ function DraggableText({ textObj, isSelected, onSelect, onUpdate, containerRef }
     if (!containerRef.current) return;
     if (mode === 'drag') setIsDragging(true);
     if (mode === 'resize') setIsResizing(true);
+    if (onDragStart) onDragStart();
 
     startPosRef.current = {
       x: e.clientX,
@@ -2262,6 +2702,7 @@ function DraggableText({ textObj, isSelected, onSelect, onUpdate, containerRef }
     const handlePointerUp = () => {
       setIsDragging(false);
       setIsResizing(false);
+      if (onDragEnd) onDragEnd();
     };
 
     window.addEventListener('pointermove', handlePointerMove);
@@ -2354,7 +2795,7 @@ const DEFAULT_EXPORT = {
   video: { preferredFormat: 'auto', bitrate: 8000000, fps: 30, renderAudio: true }
 };
 
-function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
+function SettingsModal({ config, onSave, onClose, onAssetsChanged, initialTab }) {
   const [draft, setDraft] = useState(() => {
     const cloned = JSON.parse(JSON.stringify(config));
     cloned.export = {
@@ -2363,7 +2804,7 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
     };
     return cloned;
   });
-  const [activeTab, setActiveTab] = useState('icons');
+  const [activeTab, setActiveTab] = useState(initialTab || 'icons');
   const [activePlatform, setActivePlatform] = useState(() => Object.keys(config.templates)[0] || 'Instagram');
   const [savedIndicator, setSavedIndicator] = useState(false);
   const [saveError, setSaveError] = useState(null);
@@ -2385,13 +2826,13 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
   const reorderGroups = (fromIdx, toIdx) => {
     if (fromIdx == null || toIdx == null || fromIdx === toIdx) return;
     setDraft(d => {
-      const keys = Object.keys(d.templates);
+      const keys = d.templateOrder || Object.keys(d.templates);
       const reordered = [...keys];
       const [moved] = reordered.splice(fromIdx, 1);
       reordered.splice(toIdx, 0, moved);
       const newTemplates = {};
       reordered.forEach(k => { newTemplates[k] = d.templates[k]; });
-      return { ...d, templates: newTemplates };
+      return { ...d, templates: newTemplates, templateOrder: reordered };
     });
   };
 
@@ -2590,12 +3031,16 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
     setDraft(d => ({ ...d, complianceIcons: [...d.complianceIcons, { filename: '', label: '' }] }));
   };
 
-  const platformNames = Object.keys(draft.templates);
+  const platformNames = draft.templateOrder || Object.keys(draft.templates);
 
   const addGroup = () => {
     const name = newGroupName.trim();
     if (!name || draft.templates[name]) return;
-    setDraft(d => ({ ...d, templates: { ...d.templates, [name]: [] } }));
+    setDraft(d => ({
+      ...d,
+      templates: { ...d.templates, [name]: [] },
+      templateOrder: [...(d.templateOrder || Object.keys(d.templates)), name]
+    }));
     setActivePlatform(name);
     setNewGroupName('');
     setAddingGroup(false);
@@ -2606,7 +3051,8 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
     setDraft(d => {
       const t = { ...d.templates };
       delete t[name];
-      return { ...d, templates: t };
+      const order = (d.templateOrder || Object.keys(d.templates)).filter(g => g !== name);
+      return { ...d, templates: t, templateOrder: order };
     });
     const remaining = platformNames.filter(p => p !== name);
     setActivePlatform(remaining[0] || '');
@@ -2751,7 +3197,7 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
             <button
               onClick={() => setActiveTab('export')}
               className={`w-full text-left px-3 py-2 rounded-lg text-sm font-medium transition-colors ${activeTab === 'export' ? 'bg-accent-bg text-accent-soft' : 'text-ink-400 hover:bg-ink-850 hover:text-ink-100'}`}
-            >Export</button>
+            >Misc.</button>
           </nav>
 
           {/* Right scrollable content */}
@@ -2767,8 +3213,8 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
                 {Bridge.isTauri && (
                   <button
                     onClick={handleAddIconFiles}
-                    className="text-xs flex items-center gap-1 bg-accent hover:bg-accent-soft text-white px-3 py-1.5 rounded-lg transition-colors"
-                  ><Plus size={13} /> Add Icon</button>
+                    className="text-xs flex items-center gap-1 bg-ink-850 hover:bg-ink-700 px-2 py-1 rounded text-ink-100 transition-colors"
+                  ><Plus size={14} /> Add Icon</button>
                 )}
               </div>
               {pendingDeleteIcons.length > 0 && (
@@ -2855,8 +3301,8 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
                 {Bridge.isTauri && (
                   <button
                     onClick={handleAddSafezoneFiles}
-                    className="text-xs flex items-center gap-1 bg-accent hover:bg-accent-soft text-white px-3 py-1.5 rounded-lg transition-colors"
-                  ><Plus size={13} /> Add Safezone</button>
+                    className="text-xs flex items-center gap-1 bg-ink-850 hover:bg-ink-700 px-2 py-1 rounded text-ink-100 transition-colors"
+                  ><Plus size={14} /> Add Safezone</button>
                 )}
               </div>
               {pendingDeleteSafezones.length > 0 && (
@@ -3022,91 +3468,127 @@ function SettingsModal({ config, onSave, onClose, onAssetsChanged }) {
 
           {activeTab === 'export' && (
             <div className="space-y-6">
-              <section className="bg-ink-850 border border-white/[0.08] rounded-lg p-4 space-y-3">
-                <h3 className="text-sm font-semibold text-ink-100 flex items-center gap-2">
-                  <ImageIcon size={14} /> Static Image Export
-                </h3>
-                <p className="text-[11px] text-ink-500">Applied when rendering image inputs (JPG, PNG, WebP, etc.) — controls the format and quality of the output file.</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="text-xs text-ink-400 block mb-1">Format</label>
-                    <select
-                      value={draft.export.image.format}
-                      onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, image: { ...d.export.image, format: e.target.value } } }))}
-                      className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
-                    >
-                      <option value="jpg">JPG</option>
-                      <option value="png">PNG (24-bit)</option>
-                    </select>
+              {/* Export Settings */}
+              <section className="bg-ink-850 border border-white/[0.08] rounded-lg p-4 space-y-4">
+                <h3 className="text-sm font-semibold text-ink-100">Export Settings</h3>
+
+                {/* Image Export */}
+                <div className="space-y-3 pt-2 border-t border-white/[0.06]">
+                  <h4 className="text-xs font-medium text-ink-300 flex items-center gap-1.5">
+                    <ImageIcon size={12} /> Static Image
+                  </h4>
+                  <p className="text-[11px] text-ink-500">Controls the format and quality of exported image files.</p>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="text-xs text-ink-400 block mb-1">Format</label>
+                      <select
+                        value={draft.export.image.format}
+                        onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, image: { ...d.export.image, format: e.target.value } } }))}
+                        className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
+                      >
+                        <option value="jpg">JPG</option>
+                        <option value="png">PNG (24-bit)</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-ink-400 block mb-1">
+                        Quality {draft.export.image.format === 'jpg' ? `(${draft.export.image.quality}%)` : '— N/A'}
+                      </label>
+                      <input
+                        type="range" min="1" max="100" step="1"
+                        value={draft.export.image.quality}
+                        disabled={draft.export.image.format !== 'jpg'}
+                        onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, image: { ...d.export.image, quality: parseInt(e.target.value) } } }))}
+                        className="w-full h-1.5 bg-ink-700 rounded-lg appearance-none cursor-pointer range-slider disabled:opacity-40"
+                      />
+                    </div>
                   </div>
-                  <div>
-                    <label className="text-xs text-ink-400 block mb-1">
-                      Quality {draft.export.image.format === 'jpg' ? `(${draft.export.image.quality}%)` : '— N/A'}
-                    </label>
-                    <input
-                      type="range" min="1" max="100" step="1"
-                      value={draft.export.image.quality}
-                      disabled={draft.export.image.format !== 'jpg'}
-                      onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, image: { ...d.export.image, quality: parseInt(e.target.value) } } }))}
-                      className="w-full h-1.5 bg-ink-700 rounded-lg appearance-none cursor-pointer range-slider disabled:opacity-40"
-                    />
+                  <p className="text-[10px] text-ink-500">PNG ignores the quality slider — it's always lossless 24-bit.</p>
+                </div>
+
+                {/* Video Export */}
+                <div className="space-y-3 pt-3 border-t border-white/[0.06]">
+                  <h4 className="text-xs font-medium text-ink-300 flex items-center gap-1.5">
+                    <FileVideo size={12} /> Video
+                  </h4>
+                  <p className="text-[11px] text-ink-500">Applied when rendering video inputs. MP4 is preferred if supported; otherwise WebM is used.</p>
+                  <div className="grid grid-cols-3 gap-3">
+                    <div>
+                      <label className="text-xs text-ink-400 block mb-1">Format</label>
+                      <select
+                        value={draft.export.video.preferredFormat}
+                        onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, preferredFormat: e.target.value } } }))}
+                        className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
+                      >
+                        <option value="auto">Auto (MP4 if supported)</option>
+                        <option value="webm">Force WebM</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="text-xs text-ink-400 block mb-1">Bitrate (Mbps)</label>
+                      <input
+                        type="number" min="1" max="50" step="0.5"
+                        value={Math.round((draft.export.video.bitrate / 1000000) * 10) / 10}
+                        onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, bitrate: Math.round(parseFloat(e.target.value || '0') * 1000000) } } }))}
+                        className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-xs text-ink-400 block mb-1">FPS</label>
+                      <input
+                        type="number" min="1" max="60" step="1"
+                        value={draft.export.video.fps}
+                        onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, fps: parseInt(e.target.value) || 30 } } }))}
+                        className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
+                      />
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between pt-2 border-t border-white/[0.06]">
+                    <div>
+                      <label className="text-xs text-ink-100 font-medium block">Render audio</label>
+                      <p className="text-[11px] text-ink-500 mt-0.5">When off, output files are silent.</p>
+                    </div>
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={draft.export.video.renderAudio !== false}
+                      onClick={() => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, renderAudio: !(d.export.video.renderAudio !== false) } } }))}
+                      className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border border-white/[0.08] transition-colors focus:outline-none focus-ring ${draft.export.video.renderAudio !== false ? 'bg-accent' : 'bg-ink-900'}`}
+                    >
+                      <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${draft.export.video.renderAudio !== false ? 'translate-x-4' : 'translate-x-0.5'} mt-[1px]`} />
+                    </button>
                   </div>
                 </div>
-                <p className="text-[10px] text-ink-500">PNG ignores the quality slider — it's always lossless 24-bit.</p>
               </section>
 
+              {/* Undo / Redo */}
               <section className="bg-ink-850 border border-white/[0.08] rounded-lg p-4 space-y-3">
                 <h3 className="text-sm font-semibold text-ink-100 flex items-center gap-2">
-                  <FileVideo size={14} /> Video Export
+                  <Undo2 size={14} /> Undo / Redo
                 </h3>
-                <p className="text-[11px] text-ink-500">Applied when rendering video inputs. MP4 is preferred if the browser supports it; otherwise WebM is used as a fallback.</p>
-                <div className="grid grid-cols-3 gap-3">
-                  <div>
-                    <label className="text-xs text-ink-400 block mb-1">Format</label>
-                    <select
-                      value={draft.export.video.preferredFormat}
-                      onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, preferredFormat: e.target.value } } }))}
-                      className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
-                    >
-                      <option value="auto">Auto (MP4 if supported)</option>
-                      <option value="webm">Force WebM</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="text-xs text-ink-400 block mb-1">Bitrate (Mbps)</label>
-                    <input
-                      type="number" min="1" max="50" step="0.5"
-                      value={Math.round((draft.export.video.bitrate / 1000000) * 10) / 10}
-                      onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, bitrate: Math.round(parseFloat(e.target.value || '0') * 1000000) } } }))}
-                      className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-xs text-ink-400 block mb-1">FPS</label>
-                    <input
-                      type="number" min="1" max="60" step="1"
-                      value={draft.export.video.fps}
-                      onChange={(e) => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, fps: parseInt(e.target.value) || 30 } } }))}
-                      className="w-full bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
-                    />
-                  </div>
+                <p className="text-[11px] text-ink-500">Maximum number of undo steps to keep in memory.</p>
+                <div>
+                  <label className="text-xs text-ink-400 block mb-1">Max Steps</label>
+                  <input
+                    type="number" min="1" max="50" step="1"
+                    value={draft.undoSteps || 10}
+                    onChange={(e) => setDraft(d => ({ ...d, undoSteps: Math.min(50, Math.max(1, parseInt(e.target.value) || 10)) }))}
+                    className="w-24 bg-ink-900 border border-white/[0.08] rounded px-2 py-1.5 text-sm text-white focus:outline-none focus:ring-1 focus-ring"
+                  />
                 </div>
-                <p className="text-[10px] text-ink-500">Chrome and Edge produce MP4; Firefox and Safari fall back to WebM regardless of the preference above.</p>
-                <div className="flex items-center justify-between pt-2 border-t border-white/[0.06]">
-                  <div>
-                    <label className="text-xs text-ink-100 font-medium block">Render audio</label>
-                    <p className="text-[11px] text-ink-500 mt-0.5">When off, output files are silent. Independent of the live preview volume.</p>
-                  </div>
-                  <button
-                    type="button"
-                    role="switch"
-                    aria-checked={draft.export.video.renderAudio !== false}
-                    onClick={() => setDraft(d => ({ ...d, export: { ...d.export, video: { ...d.export.video, renderAudio: !(d.export.video.renderAudio !== false) } } }))}
-                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border border-white/[0.08] transition-colors focus:outline-none focus-ring ${draft.export.video.renderAudio !== false ? 'bg-accent' : 'bg-ink-900'}`}
-                  >
-                    <span className={`inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform ${draft.export.video.renderAudio !== false ? 'translate-x-4' : 'translate-x-0.5'} mt-[1px]`} />
-                  </button>
-                </div>
+              </section>
+
+              {/* Safe Area */}
+              <section className="bg-ink-850 border border-white/[0.08] rounded-lg p-4 space-y-3">
+                <h3 className="text-sm font-semibold text-ink-100 flex items-center gap-2">
+                  <Eye size={14} /> Safe Area
+                </h3>
+                <p className="text-[11px] text-ink-500">Customize the safe area border color shown on the canvas.</p>
+                <ColorInput
+                  label="Border Color"
+                  value={draft.safeAreaColor || '#ef4444ff'}
+                  onChange={(val) => setDraft(d => ({ ...d, safeAreaColor: val }))}
+                />
               </section>
             </div>
           )}
