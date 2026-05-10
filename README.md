@@ -1,7 +1,7 @@
 # Batch Studio PC
 <img width="1442" height="932" alt="image" src="https://github.com/user-attachments/assets/7c810195-4743-4055-8693-66c3bcacd160" />
 
-A powerful desktop video editor for repurposing a single source video **or static image** into multiple platform-sized outputs (Instagram, TikTok, YouTube, etc.) with text, icon overlays, and compliance badges.
+A FREE powerful desktop video editor for repurposing source **videos or static images** into multiple platform-sized outputs (Instagram, TikTok, YouTube, etc.) with text, icon overlays, and compliance badges.
 
 Everything runs locally on your PC — no media is ever uploaded to a server, and exports are powered by a high-performance FFmpeg-native pipeline.
 
