@@ -20,6 +20,11 @@ Everything runs locally on your PC — no media is ever uploaded to a server, an
 - **Hardened IPC:** All Rust commands validate inputs (magic bytes, numeric ranges, schema-checked config).
 - **Privacy First:** All processing happens offline on your machine — no network calls at runtime.
 
+## Download builds
+
+The latest portable and installer builds available at:
+https://github.com/asafco83/BatchStudio_PC/releases/latest
+
 ## Tech Stack
 
 - **Frontend:** React 18 · Vite 6 · Tailwind 3 · lucide-react
@@ -66,11 +71,6 @@ Outputs land in:
 - `src-tauri/target/release/bundle/msi/Batch Studio_<ver>_x64_en-US.msi`
 
 The Rust dependencies are vendored under `src-tauri/vendor/`, so the build runs offline once `node_modules/` is installed.
-
-## Download builds
-
-The latest portable and installer builds available at:
-https://github.com/asafco83/BatchStudio_PC/releases/latest
 
 
 ## Project Layout
