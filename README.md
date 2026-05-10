@@ -67,9 +67,11 @@ Outputs land in:
 
 The Rust dependencies are vendored under `src-tauri/vendor/`, so the build runs offline once `node_modules/` is installed.
 
-## Portable build
-Download and extract zip:
-https://github.com/asafco83/BatchStudio_PC/blob/main/Batch-Studio-portable.zip
+## Download builds
+
+The latest portable and installer builds available at:
+https://github.com/asafco83/BatchStudio_PC/releases/latest
+
 
 ## Project Layout
 
