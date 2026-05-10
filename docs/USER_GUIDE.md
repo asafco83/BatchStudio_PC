@@ -54,13 +54,21 @@ Batch Studio provides four ways to handle aspect ratio mismatches:
 ### Text
 - **Add Text:** Click the button in the Content tab to place a new text box.
 - **Edit:** Double-click to type directly on the canvas.
-- **Styling:** Customize font, weight, size, color, background, alignment, and shadow/outline in the side panel.
-- **Responsive:** Text sizes are relative to the canvas width, ensuring consistent results at any output resolution.
+- **Styling:** Customize font, weight, size, color, background, alignment, padding, and shadow/outline in the side panel.
+- **Responsive:** Text sizes are relative to the canvas width (`cqw` units), ensuring consistent results at any output resolution.
+- **Nudging:** With a text or icon selected, use the arrow keys to nudge by 1px (or 10px with `Shift`).
 
 ### Icons (Compliance Badges)
-- **Add Icon:** Choose from a list of pre-configured compliance badges.
-- **Constraints:** Some icons have a configured minimum width to ensure they remain legible for regulatory compliance.
+- **Add Icon:** Choose from your library of pre-configured compliance badges in the **Content** panel.
+- **Manage Icons:** Click the **Manage Icons** link in the Content panel to jump straight to **Settings → Icons**, where you can add, rename, set minimum widths, or remove badges.
+- **Constraints:** Each icon can be given a minimum width (in pixels) to ensure it remains legible for regulatory compliance. The canvas enforces this clamp while you resize.
 - **Positioning:** Drag to move, and use the corner handles to resize while maintaining the original aspect ratio.
+
+### Undo / Redo
+- **Shortcuts:** `Ctrl+Z` to undo, `Ctrl+Shift+Z` (or `Ctrl+Y`) to redo.
+- **Scope:** History tracks the queue, selected template, fit mode, manual transform, text overlays, and icon overlays.
+- **Depth:** Configurable in **Settings → General → Undo Steps** (default: 10).
+- **Live edits:** Drags and continuous typing are committed to history once the gesture finishes, so a single undo reverses the whole motion rather than a single pixel.
 
 ---
 
@@ -69,8 +77,10 @@ Batch Studio provides four ways to handle aspect ratio mismatches:
 Batch Studio PC uses a high-performance **FFmpeg-native** engine for video processing.
 
 - **Progress:** Watch real-time progress bars as each entry in the queue is rendered.
+- **Cancel:** Hit **Cancel** during a render to abort the FFmpeg process and stop the queue.
 - **Automatic Naming:** Processed files are saved as `<original>_processed.<ext>`.
 - **Duplicate Prevention:** If a file with the same name already exists in the output folder, Batch Studio will automatically append a number (e.g., `_2`) to prevent overwrites.
+- **Outro Concatenation:** When an outro video is set, each rendered video is concatenated with it via FFmpeg's `concat` demuxer in a second pass.
 
 ### Video Export
 - **Formats:** MP4 (preferred) or WebM.
@@ -90,14 +100,24 @@ Click the gear icon to customize your workflow:
 ### Compliance Icons
 - Manage your library of regulatory badges.
 - Set label names and minimum size constraints.
-- Icons are loaded from the local `resources/compliance/` directory.
+- **Add / Remove:** Use the file picker to add new PNG/SVG/JPG icons; deleted icons are removed only after you click **Save**.
+- Icons live in a writable per-user directory (e.g. `%APPDATA%\com.batchstudio.app\compliance\` on Windows), seeded on first launch from the bundled defaults.
+
+### Safe Zones
+- Upload reference overlays (e.g., TikTok / Reels UI maps) so you can position content outside platform chrome.
+- Customize the on-canvas safe-zone color (per-template) and toggle visibility from the canvas toolbar.
 
 ### Output Templates
-- Create custom width/height presets.
-- Configure **Safe Zones** (e.g., for TikTok/Reels UI) to ensure overlays don't get covered by platform interface elements.
+- Create custom width/height presets, organized into platform groups.
+- Drag groups and templates to reorder them.
+- Set per-template safe zones.
 
 ### Export Settings
 - Define default bitrates, frame rates, and image quality levels for all renders.
+- Per-format toggles (MP4 vs WebM, JPG vs PNG with alpha).
+
+### General
+- **Undo Steps:** Maximum number of history entries kept in memory.
 
 ---
 
@@ -106,5 +126,7 @@ Click the gear icon to customize your workflow:
 - **Video Ingestion Fails:** Ensure the file is not corrupted. Most common codecs are supported via FFmpeg.
 - **Render is Slow:** While FFmpeg is fast, high-resolution encoding is resource-intensive. Ensure your PC has adequate ventilation and power.
 - **Audio Mismatch:** If your source video has non-standard audio sampling, FFmpeg will attempt to normalize it, but verify the output for complex audio tracks.
-- **Settings Not Saving:** In the desktop app, settings are saved to a local `config.json`. Ensure the application has permission to write to its own directory.
+- **Settings Not Saving:** Settings persist to `config.json` inside the per-user app data directory (e.g. `%APPDATA%\com.batchstudio.app\` on Windows). If saves fail, check that the app has write permission there. Invalid values (e.g. bitrate above 50 Mbps, dimensions above 7680×4320) are rejected by the backend schema validator and surfaced as a save error.
+- **Render Won't Start:** The backend rejects media files whose magic bytes don't match a known format (MP4/MOV/WebM/MKV/AVI/FLV/JPG/PNG/GIF/BMP/WebP/SVG). Re-encode unrecognized files before importing.
+- **Undo Lost After Reload:** History is in-memory only; closing or reloading the app clears it.
 
